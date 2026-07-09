@@ -267,6 +267,7 @@ const BUBBLE_CONFIG = Object.freeze({
   minHeight: 48,
   maxHeight: 420,
   gapPx: 2,
+  renderFallbackMs: 350,
   usageAutoHideMs: 12000,
   doneAutoHideMs: 8000,
   activityMaxChars: 240,
@@ -282,7 +283,11 @@ let isQuitting = false;
 
 let bubbleWindow = null;
 let bubbleHideTimer = null;
+let bubbleRenderFallbackTimer = null;
 let codexLoginLaunchInProgress = false;
+// 말풍선 창 renderer가 아직 로드 전이어도 Codex 대화 이벤트를 잃지 않기 위한 상태입니다.
+let bubbleReady = false;
+let pendingBubbleData = null;
 // 내용 갱신(UPDATE) 후 renderer가 높이를 보고(RESIZE)해야 창을 보여줍니다.
 // 그 사이에 hide 요청이 오면 표시를 취소하기 위한 플래그입니다.
 let bubblePendingShow = false;
@@ -1451,19 +1456,43 @@ function positionBubble() {
   bubbleWindow.setBounds({ x, y, width: BUBBLE_CONFIG.width, height: bubbleHeight });
 }
 
-// 말풍선 내용을 갱신합니다. 실제 표시는 renderer가 높이를 보고한 뒤(BUBBLE_CHANNELS.RESIZE) 이루어집니다.
+// 준비된 말풍선 renderer로 보류 중인 데이터를 보냅니다.
+// Codex 대화 말풍선은 앱 시작 직후에도 바로 들어올 수 있으므로, load 전 UPDATE 유실을 막아야 합니다.
+function flushPendingBubbleData() {
+  if (!bubbleReady || !pendingBubbleData || !bubbleWindow || bubbleWindow.isDestroyed()) return;
+
+  bubbleWindow.webContents.send(BUBBLE_CHANNELS.UPDATE, pendingBubbleData);
+
+  // 정상 경로는 bubble.js가 내용 높이를 보고하고 RESIZE 핸들러에서 showInactive()를 호출하는 것입니다.
+  // 그래도 renderer IPC가 한 번 누락되면 계속 숨겨지는 문제가 생기므로 기본 높이로라도 표시하는 fallback을 둡니다.
+  clearTimeout(bubbleRenderFallbackTimer);
+  bubbleRenderFallbackTimer = setTimeout(() => {
+    if (!bubblePendingShow || !bubbleWindow || bubbleWindow.isDestroyed()) return;
+
+    positionBubble();
+    if (!bubbleWindow.isVisible()) {
+      bubbleWindow.showInactive();
+    }
+  }, BUBBLE_CONFIG.renderFallbackMs);
+}
+
+// 말풍선 내용을 갱신합니다. 창이 아직 로드 전이면 pendingBubbleData에 보관했다가 로드 후 보냅니다.
 function showBubble(data) {
   if (!bubbleWindow || bubbleWindow.isDestroyed()) return;
 
   clearTimeout(bubbleHideTimer);
   bubbleHideTimer = null;
+  pendingBubbleData = data;
   bubblePendingShow = true;
-  bubbleWindow.webContents.send(BUBBLE_CHANNELS.UPDATE, data);
+  flushPendingBubbleData();
 }
 
 function hideBubble() {
   clearTimeout(bubbleHideTimer);
+  clearTimeout(bubbleRenderFallbackTimer);
   bubbleHideTimer = null;
+  bubbleRenderFallbackTimer = null;
+  pendingBubbleData = null;
   bubblePendingShow = false;
 
   if (bubbleWindow && !bubbleWindow.isDestroyed()) {
@@ -1730,6 +1759,8 @@ function maybeWarnUsage(usage) {
 
 // 말풍선용 투명 창을 만듭니다. 포커스를 뺏지 않도록 focusable을 끕니다.
 function createBubbleWindow() {
+  bubbleReady = false;
+
   bubbleWindow = new BrowserWindow({
     ...WINDOW_CONFIG,
     width: BUBBLE_CONFIG.width,
@@ -1747,9 +1778,27 @@ function createBubbleWindow() {
   });
 
   bubbleWindow.setMenuBarVisibility(false);
-  bubbleWindow.loadFile(path.join(__dirname, "bubble.html"));
+
+  // 이 이벤트를 놓치면 Codex watcher 시작이나 대화 말풍선 표시가 막히므로 loadFile 전에 등록합니다.
+  bubbleWindow.webContents.once("did-finish-load", () => {
+    bubbleReady = true;
+    flushPendingBubbleData();
+  });
+
+  bubbleWindow.webContents.once("did-fail-load", (_event, errorCode, errorDescription) => {
+    bubbleReady = false;
+    console.warn("[desktop-pet] Bubble window failed to load.", errorCode, errorDescription);
+  });
+
+  bubbleWindow.loadFile(path.join(__dirname, "bubble.html")).catch((error) => {
+    bubbleReady = false;
+    console.warn("[desktop-pet] Bubble window loadFile failed.", error.message);
+  });
 
   bubbleWindow.on("closed", () => {
+    bubbleReady = false;
+    pendingBubbleData = null;
+    bubblePendingShow = false;
     bubbleWindow = null;
   });
 }
@@ -1865,6 +1914,8 @@ function registerIpcHandlers() {
     }
 
     positionBubble();
+    clearTimeout(bubbleRenderFallbackTimer);
+    bubbleRenderFallbackTimer = null;
 
     if (bubblePendingShow && !bubbleWindow.isVisible()) {
       bubbleWindow.showInactive();
@@ -1900,11 +1951,9 @@ app.whenReady().then(() => {
   createWindow();
   createBubbleWindow();
 
-  // 말풍선 renderer가 준비된 뒤에 감시를 시작해야
-  // 시작 직후 복원된 "작업 중" 말풍선이 유실되지 않습니다.
-  bubbleWindow.webContents.once("did-finish-load", () => {
-    codexWatcher.start();
-  });
+  // 사용량 풍선은 수동 호출이라 문제가 없지만, 대화 말풍선은 watcher가 시작되지 않으면 절대 뜨지 않습니다.
+  // 그래서 말풍선 renderer 로드 여부와 무관하게 감시를 바로 시작하고, 표시 데이터는 showBubble()에서 큐잉합니다.
+  codexWatcher.start();
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -1923,6 +1972,7 @@ app.on("window-all-closed", () => {
   clearTimeout(phaseTimer);
   clearTimeout(reactionTimer);
   clearTimeout(bubbleHideTimer);
+  clearTimeout(bubbleRenderFallbackTimer);
   codexWatcher.stop();
 
   // 트레이에 남아 있어야 하는 일반 닫힘과, "완전 종료"를 명확히 분리합니다.

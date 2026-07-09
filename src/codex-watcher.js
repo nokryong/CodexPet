@@ -21,8 +21,10 @@ const WATCHER_CONFIG = Object.freeze({
   // 더블클릭 사용량 조회는 이 로그를 우선 스캔해서 세션 JSONL 캐시보다 최신 값을 가져옵니다.
   logUsageScanBytes: 32 * 1024 * 1024,
   logUsageFiles: ["logs_2.sqlite-wal", "logs_2.sqlite"],
-  // 최근 며칠치 날짜 폴더에서 rollout 파일을 찾을지 정합니다.
-  recentDayDirs: 3,
+  // Codex Desktop은 오래전에 만든 thread를 오늘 다시 이어도 원래 생성일 폴더에 계속 append합니다.
+  // 그래서 "최근 날짜 폴더 N개"만 보면 현재 대화를 놓칠 수 있습니다. day 폴더는 전부 훑고,
+  // 실제 tail 대상은 rollout 파일의 수정 시각(mtime) 기준 최신 N개만 고릅니다.
+  maxDayDirsToScan: 180,
   // 동시에 tail할 최근 파일 수입니다. 동시 세션이 이보다 많으면 오래된 세션은 놓칠 수 있습니다.
   tailFiles: 5,
   // 작업 중 표시가 이 시간 동안 아무 이벤트 없이 유지되면 Codex가 죽었다고 보고 해제합니다.
@@ -65,8 +67,10 @@ function normalizeUsage(rateLimits, recordedAt = null, source = "sessions") {
   };
 }
 
-// sessions/YYYY/MM/DD 구조에서 최신 날짜 폴더 몇 개를 내림차순으로 돌려줍니다.
-function listRecentDayDirs(limit, sessionsDir = DEFAULT_SESSIONS_DIR) {
+// sessions/YYYY/MM/DD 구조에서 day 폴더를 찾습니다.
+// 폴더명 날짜가 아니라 rollout 파일 수정 시각이 "현재 활성 대화"를 가리키므로,
+// 여기서는 넓게 모으고 listRecentRolloutFiles()에서 mtime 기준으로 다시 자릅니다.
+function listSessionDayDirs(limit = WATCHER_CONFIG.maxDayDirsToScan, sessionsDir = DEFAULT_SESSIONS_DIR) {
   const dayDirs = [];
 
   let years;
@@ -104,11 +108,12 @@ function listRecentDayDirs(limit, sessionsDir = DEFAULT_SESSIONS_DIR) {
   return dayDirs;
 }
 
-// 최근 날짜 폴더들에서 rollout 파일을 수정 시각 내림차순으로 모아 돌려줍니다.
+// day 폴더들에서 rollout 파일을 수정 시각 내림차순으로 모아 돌려줍니다.
+// 오래된 thread가 오늘 append되는 경우 폴더명은 오래됐지만 mtime은 최신이므로 반드시 mtime을 기준으로 합니다.
 function listRecentRolloutFiles(limit, sessionsDir = DEFAULT_SESSIONS_DIR) {
   const files = [];
 
-  for (const dayDir of listRecentDayDirs(WATCHER_CONFIG.recentDayDirs, sessionsDir)) {
+  for (const dayDir of listSessionDayDirs(WATCHER_CONFIG.maxDayDirsToScan, sessionsDir)) {
     let names;
     try {
       names = fs.readdirSync(dayDir);
