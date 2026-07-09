@@ -1,7 +1,9 @@
-const { app, BrowserWindow, Menu, Tray, nativeImage, ipcMain, screen } = require("electron");
+const { app, BrowserWindow, Menu, Tray, nativeImage, ipcMain, screen, shell } = require("electron");
+const { spawn } = require("node:child_process");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const { CodexAccountSwitcher } = require("./codex-account-switcher");
 const { CodexWatcher } = require("./codex-watcher");
 
 // IPC 채널명은 main/preload/renderer가 같은 문자열을 써야 하므로 상수로 모아 둡니다.
@@ -24,6 +26,15 @@ const BUBBLE_CHANNELS = Object.freeze({
   UPDATE: "bubble:update",
   RESIZE: "bubble:resize",
   DISMISS: "bubble:dismiss",
+  ACTION: "bubble:action",
+});
+
+// 말풍선 버튼에서 main process로 전달하는 action id입니다.
+// renderer에는 인증 파일 경로나 토큰을 넘기지 않고, 이 id만 넘깁니다.
+const BUBBLE_ACTIONS = Object.freeze({
+  LOGIN_CODEX_ACCOUNT: "codex-account:login",
+  SAVE_CODEX_ACCOUNT: "codex-account:save-current",
+  SWITCH_CODEX_ACCOUNT: "codex-account:switch",
 });
 
 // 창 크기는 스프라이트 한 칸의 크기와 같게 맞춥니다.
@@ -55,6 +66,17 @@ const MOVEMENT_CONFIG = Object.freeze({
   maxIdleMs: 2200,
   idleAfterDragMs: 900,
   idleAfterReactionMs: 650,
+});
+
+// Codex 계정 전환 뒤 Codex Desktop App을 다시 띄우는 설정입니다.
+// codex-auth/codex-profile류 스위처들은 auth를 바꾼 뒤 실행 중인 클라이언트를 재시작해야
+// 새 auth가 확실히 적용되는 구조를 씁니다. CodePet도 같은 흐름을 따릅니다.
+// enabledAfterAccountSwitch를 false로 바꾸면 active 프로필만 저장하고 재시작은 하지 않습니다.
+const CODEX_DESKTOP_RESTART_CONFIG = Object.freeze({
+  enabledAfterAccountSwitch: true,
+  windowsProcessPathMarker: "\\WindowsApps\\OpenAI.Codex_",
+  launchDelayMs: 900,
+  timeoutMs: 20000,
 });
 
 // renderer에서 크기 조절 요청이 들어와도 main process에서 다시 검증합니다.
@@ -260,6 +282,7 @@ let isQuitting = false;
 
 let bubbleWindow = null;
 let bubbleHideTimer = null;
+let codexLoginLaunchInProgress = false;
 // 내용 갱신(UPDATE) 후 renderer가 높이를 보고(RESIZE)해야 창을 보여줍니다.
 // 그 사이에 hide 요청이 오면 표시를 취소하기 위한 플래그입니다.
 let bubblePendingShow = false;
@@ -272,6 +295,9 @@ const USAGE_WARN_THRESHOLD_PERCENT = 90;
 // 같은 초기화 주기 안에서 경고를 반복하지 않도록 마지막으로 경고한 resets_at을 기억합니다.
 const usageWarnedResets = { primary: null, secondary: null };
 
+const codexAccountSwitcher = new CodexAccountSwitcher();
+codexAccountSwitcher.cleanupLegacyCodePetState();
+codexAccountSwitcher.ensureCurrentAccountProfile();
 const codexWatcher = new CodexWatcher();
 
 // runtime은 현재 창 위치, 이동 방향, 수동 일시정지 상태처럼 실행 중 계속 바뀌는 값입니다.
@@ -627,18 +653,512 @@ function buildPetSelectionSubmenu() {
   }));
 }
 
+// Codex 계정은 저장된 auth profile 단위로 표시합니다.
+// 빈 pending 로그인 폴더는 codex-account-switcher.js에서 걸러서 UI에 나오지 않습니다.
+function formatCodexAccountLabel(profile) {
+  const label = profile.hasAuth
+    ? profile.label || `Codex ${profile.shortId || "unknown"}`
+    : `${profile.id || profile.key} (로그인 필요)`;
+  return profile.active ? `${label} (현재)` : label;
+}
+
+// PowerShell 명령 문자열에 파일 경로를 안전하게 넣기 위한 작은 helper입니다.
+// 경로 안에 작은따옴표가 있어도 PowerShell single-quoted string 규칙에 맞게 이스케이프합니다.
+function quotePowerShellString(value) {
+  return `'${String(value).replace(/'/g, "''")}'`;
+}
+
+// cmd.exe /c start 안에 들어갈 경로를 큰따옴표로 감쌉니다.
+// Windows 파일 경로에는 보통 큰따옴표가 없지만, 혹시 모를 값을 이스케이프해 둡니다.
+function quoteCmdArgument(value) {
+  return `"${String(value).replace(/"/g, '\\"')}"`;
+}
+
+// userData에 남기는 간단한 디버그 로그입니다.
+// 로그인 터미널처럼 사용자가 "아무 일도 안 일어났다"고 느끼는 작업은 실제 launcher 오류를 남겨야 추적이 됩니다.
+function appendDebugLog(message) {
+  try {
+    const line = `[${new Date().toISOString()}] ${message}\n`;
+    fs.appendFileSync(path.join(app.getPath("userData"), "codepet.log"), line, "utf8");
+  } catch {
+    // 로그 쓰기 실패 때문에 앱 기능 자체를 막지는 않습니다.
+  }
+}
+
+// Codex 공식 로그인 흐름을 실행할 .cmd 파일을 만듭니다.
+// CodePet은 토큰을 직접 받지 않고, pending profile CODEX_HOME 안에서 `codex login`만 실행하게 합니다.
+function writeCodexLoginScript(profile) {
+  const scriptPath = path.join(app.getPath("userData"), "codepet-codex-login.cmd");
+  const codexCommand = codexAccountSwitcher.resolveCodexCommandForBatch();
+  const codexLoginLine = codexCommand
+    ? `call ${quoteCmdArgument(codexCommand)} login`
+    : "call codex login";
+
+  fs.writeFileSync(
+    scriptPath,
+    [
+      "@echo off",
+      `title CodePet Codex Login - ${profile.id}`,
+      "echo CodePet Codex Login",
+      "echo.",
+      `echo Profile: ${profile.id}`,
+      `echo CODEX_HOME: ${profile.homePath}`,
+      "set \"CODEX_HOME=" + profile.homePath + "\"",
+      "echo.",
+      codexCommand
+        ? `echo Using Codex command: ${codexCommand}`
+        : "echo Codex command was not resolved by CodePet. Trying PATH lookup...",
+      "echo.",
+      codexCommand ? "" : "where codex >nul 2>nul",
+      codexCommand ? "" : "if errorlevel 1 (",
+      codexCommand ? "" : "  echo codex command was not found in PATH.",
+      codexCommand ? "" : "  echo Install Codex CLI or open a terminal where codex works.",
+      codexCommand ? "" : "  echo.",
+      codexCommand ? "" : "  pause",
+      codexCommand ? "" : "  exit /b 1",
+      codexCommand ? "" : ")",
+      codexLoginLine,
+      "set CODEPET_LOGIN_EXIT=%ERRORLEVEL%",
+      "echo.",
+      "if not \"%CODEPET_LOGIN_EXIT%\"==\"0\" (",
+      "  echo Codex login exited with code %CODEPET_LOGIN_EXIT%.",
+      ") else (",
+      "  echo Codex login command finished.",
+      ")",
+      "echo Return to CodePet and open the account switch menu.",
+      "echo.",
+      "pause",
+      "",
+    ].filter((line) => line !== "").join("\r\n"),
+    "utf8"
+  );
+
+  appendDebugLog(
+    `login script written: ${scriptPath}; profile=${profile.key}; home=${profile.homePath}; codex=${codexCommand || "PATH"}`
+  );
+  return scriptPath;
+}
+
+// Codex 로그인은 브라우저/OAuth/터미널 상호작용이 필요하므로 CodePet 내부에서 직접 처리하지 않습니다.
+// 대신 pending profile CODEX_HOME을 만든 뒤 별도 터미널에서 `codex login`을 한 번만 실행합니다.
+async function openCodexLoginTerminal() {
+  if (codexLoginLaunchInProgress) {
+    showCodexAccountBubble("이미 Codex 로그인 터미널을 여는 중입니다.");
+    return;
+  }
+
+  codexLoginLaunchInProgress = true;
+
+  try {
+    codexAccountSwitcher.ensureCurrentAccountProfile();
+    const profile = codexAccountSwitcher.createLoginProfile();
+    const scriptPath = writeCodexLoginScript(profile);
+
+    if (process.platform !== "win32") {
+      throw new Error("현재 CodePet 로그인 실행기는 Windows용으로 작성되어 있습니다.");
+    }
+
+    showCodexAccountBubble(
+      "새 Codex 로그인 터미널을 여는 중입니다."
+    );
+
+    // 여러 launcher를 순차 시도하면 실패 판정이 애매해서 터미널이 여러 개 뜹니다.
+    // ShellExecute 한 경로만 사용하고, 실패하면 사용자가 직접 실행할 스크립트 경로를 보여줍니다.
+    const error = await shell.openPath(scriptPath);
+    appendDebugLog(`login terminal ShellExecute: ${error || "ok"}`);
+
+    if (error) {
+      showCodexAccountBubble(
+        `Codex 로그인 터미널을 열지 못했어요.\n직접 이 파일을 실행해 주세요:\n${scriptPath}\n\n${error}`
+      );
+      return;
+    }
+
+    showCodexAccountBubble(
+      "Codex 로그인 터미널을 열었어요.\n로그인이 끝나면 '전환' 목록에 실제 계정명으로 나타납니다."
+    );
+  } catch (error) {
+    showCodexAccountBubble(
+      `Codex 로그인 터미널을 열지 못했어요.\n${error.message || String(error)}`
+    );
+  } finally {
+    setTimeout(() => {
+      codexLoginLaunchInProgress = false;
+    }, 3000);
+  }
+}
+
+// PowerShell helper를 숨김 창으로 실행합니다.
+// Codex Desktop 재시작처럼 Windows 프로세스 목록을 다뤄야 하는 작업만 이 helper를 사용합니다.
+function runHiddenPowerShell(command, timeoutMs = 15000) {
+  return new Promise((resolve) => {
+    const child = spawn(
+      "powershell.exe",
+      ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+      {
+        windowsHide: true,
+        stdio: ["ignore", "pipe", "pipe"],
+      }
+    );
+
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(result);
+    };
+
+    const timer = setTimeout(() => {
+      child.kill();
+      finish({
+        ok: false,
+        code: null,
+        stdout,
+        stderr: `${stderr}\nTimed out after ${timeoutMs}ms`.trim(),
+      });
+    }, timeoutMs);
+
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString();
+    });
+
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+
+    child.once("error", (error) => {
+      finish({
+        ok: false,
+        code: null,
+        stdout,
+        stderr: error.message || String(error),
+      });
+    });
+
+    child.once("close", (code) => {
+      finish({
+        ok: code === 0,
+        code,
+        stdout: stdout.trim(),
+        stderr: stderr.trim(),
+      });
+    });
+  });
+}
+
+// Windows의 Codex Desktop App만 선별적으로 종료합니다.
+// 일반 터미널 Codex CLI 세션까지 죽이지 않기 위해 WindowsApps 패키지 경로를 가진 프로세스만 대상으로 삼습니다.
+async function stopCodexDesktopApp() {
+  if (!CODEX_DESKTOP_RESTART_CONFIG.enabledAfterAccountSwitch) {
+    return { ok: true, skipped: true, stdout: "Restart disabled by config." };
+  }
+
+  if (process.platform !== "win32") {
+    return { ok: true, skipped: true, stdout: "No Windows process stop needed." };
+  }
+
+  const marker = quotePowerShellString(CODEX_DESKTOP_RESTART_CONFIG.windowsProcessPathMarker);
+  const launchDelayMs = CODEX_DESKTOP_RESTART_CONFIG.launchDelayMs;
+  const command = `
+$ErrorActionPreference = 'Stop'
+$marker = ${marker}
+$processes = @(Get-CimInstance Win32_Process | Where-Object {
+  ($_.ExecutablePath -and $_.ExecutablePath.Contains($marker)) -or
+  ($_.CommandLine -and $_.CommandLine.Contains($marker))
+})
+$ids = @($processes | Select-Object -ExpandProperty ProcessId -Unique)
+foreach ($id in $ids) {
+  try {
+    Stop-Process -Id $id -Force -ErrorAction SilentlyContinue
+  } catch {}
+}
+Start-Sleep -Milliseconds ${launchDelayMs}
+Write-Output "Stopped $($ids.Count) Codex Desktop process(es)."
+`.trim();
+
+  const result = await runHiddenPowerShell(command, CODEX_DESKTOP_RESTART_CONFIG.timeoutMs);
+  if (!result.ok) {
+    throw new Error(result.stderr || result.stdout || "Codex Desktop stop failed.");
+  }
+
+  return result;
+}
+
+// 현재 ~/.codex/auth.json 기준으로 Codex Desktop App을 실행합니다.
+function launchCodexDesktopApp() {
+  if (process.platform !== "win32") {
+    const child = spawn("codex", ["app"], {
+      detached: true,
+      stdio: "ignore",
+    });
+    child.unref();
+    return Promise.resolve({ ok: true, skipped: false, stdout: "Launched codex app." });
+  }
+
+  const codexCommand = codexAccountSwitcher.resolveCodexCommandForBatch();
+  const codexLaunchLine = codexCommand ? `${quoteCmdArgument(codexCommand)} app` : "codex app";
+  const codexLaunchLinePs = quotePowerShellString(codexLaunchLine);
+  const hasResolvedCodexCommand = codexCommand ? "$true" : "$false";
+
+  const command = `
+$ErrorActionPreference = 'Stop'
+$codexLaunchLine = ${codexLaunchLinePs}
+$hasResolvedCodexCommand = ${hasResolvedCodexCommand}
+if ($hasResolvedCodexCommand -or (Get-Command codex -ErrorAction SilentlyContinue)) {
+  Start-Process -FilePath 'cmd.exe' -ArgumentList @('/d','/s','/c',$codexLaunchLine) -WindowStyle Hidden
+} else {
+  $appExe = Get-ChildItem -LiteralPath 'C:\\Program Files\\WindowsApps' -Filter 'OpenAI.Codex_*' -Directory -ErrorAction SilentlyContinue |
+    Sort-Object LastWriteTime -Descending |
+    ForEach-Object { Join-Path $_.FullName 'app\\Codex.exe' } |
+    Where-Object { Test-Path -LiteralPath $_ } |
+    Select-Object -First 1
+  if (-not $appExe) {
+    throw 'codex command and Codex Desktop executable were not found.'
+  }
+  Start-Process -FilePath $appExe
+}
+Write-Output "Codex Desktop launch requested."
+`.trim();
+
+  return runHiddenPowerShell(command, CODEX_DESKTOP_RESTART_CONFIG.timeoutMs).then((result) => {
+    if (!result.ok) {
+      throw new Error(result.stderr || result.stdout || "Codex Desktop launch failed.");
+    }
+    return result;
+  });
+}
+
+async function restartCodexDesktopApp() {
+  const stopResult = await stopCodexDesktopApp();
+  const launchResult = await launchCodexDesktopApp();
+  return {
+    ok: true,
+    skipped: stopResult.skipped && launchResult.skipped,
+    stdout: `${stopResult.stdout}\n${launchResult.stdout}`.trim(),
+  };
+}
+
+async function restartCurrentCodexDesktopApp() {
+  try {
+    showCodexAccountBubble("Codex Desktop App을 다시 실행하는 중입니다.");
+    await restartCodexDesktopApp();
+    showCodexAccountBubble("Codex Desktop App 재실행을 요청했습니다.");
+  } catch (error) {
+    showCodexAccountBubble(
+      `Codex Desktop App 재실행에 실패했습니다.\n${error.message || String(error)}`
+    );
+  }
+}
+
+// 사용량 말풍선 하단에 붙일 계정 관리 버튼입니다.
+function buildCodexAccountActions() {
+  const profiles = codexAccountSwitcher.listProfiles();
+  const readyCount = profiles.filter((profile) => profile.hasAuth).length;
+
+  return [
+    {
+      id: BUBBLE_ACTIONS.LOGIN_CODEX_ACCOUNT,
+      label: "계정 추가",
+    },
+    {
+      id: BUBBLE_ACTIONS.SAVE_CODEX_ACCOUNT,
+      label: "현재 저장",
+    },
+    {
+      id: BUBBLE_ACTIONS.SWITCH_CODEX_ACCOUNT,
+      label: readyCount > 0 ? `전환 (${readyCount})` : "전환",
+    },
+  ];
+}
+
+// 계정 프로필 실행/전환 결과를 펫 말풍선으로 알려줍니다.
+function showCodexAccountBubble(text) {
+  clearTimeout(bubbleHideTimer);
+  bubbleHideTimer = null;
+
+  showPetWindowFromTray();
+  showBubble({
+    kind: "activity",
+    title: "Codex 계정",
+    busy: false,
+    text,
+  });
+
+  bubbleHideTimer = setTimeout(() => {
+    if (codexWatcher.working && lastActivityBubble) {
+      showBubble(lastActivityBubble);
+    } else {
+      hideBubble();
+    }
+  }, BUBBLE_CONFIG.doneAutoHideMs);
+}
+
+// 현재 live ~/.codex/auth.json을 CodePet 저장소에 저장합니다.
+function saveCurrentCodexAccount() {
+  try {
+    const profile = codexAccountSwitcher.saveCurrentAccount();
+    refreshTrayMenu();
+    showCodexAccountBubble(
+      `"${profile.label}" 계정을 저장했습니다.\n전환 목록에는 로그인된 계정만 표시됩니다.`
+    );
+  } catch (error) {
+    showCodexAccountBubble(
+      `현재 Codex 계정을 저장하지 못했어요.\n${error.message || String(error)}`
+    );
+  }
+}
+
+// 저장된 계정 목록을 네이티브 메뉴로 띄웁니다.
+// auth.json이 없는 pending/빈 프로필은 codex-account-switcher.js에서 제거되어 여기에 나오지 않습니다.
+function showCodexAccountSwitchMenu() {
+  clearTimeout(bubbleHideTimer);
+  bubbleHideTimer = null;
+
+  const profiles = codexAccountSwitcher.listProfiles();
+
+  if (profiles.length === 0) {
+    showCodexAccountBubble(
+      "저장된 Codex 계정이 없습니다.\n먼저 '현재 저장'을 누르거나 '계정 추가'로 새 계정에 로그인하세요."
+    );
+    return;
+  }
+
+  const template = profiles.map((profile) => ({
+    label: formatCodexAccountLabel(profile),
+    type: "radio",
+    checked: profile.active,
+    enabled: profile.hasAuth,
+    click: () => switchCodexAccount(profile.key),
+  }));
+
+  Menu.buildFromTemplate(template).popup({
+    window: bubbleWindow && !bubbleWindow.isDestroyed() && bubbleWindow.isVisible()
+      ? bubbleWindow
+      : petWindow,
+  });
+}
+
+// 실제 계정 전환입니다.
+// Codex Desktop을 먼저 멈추고, 저장된 auth를 ~/.codex/auth.json으로 교체한 뒤 다시 실행합니다.
+// 이미 떠 있는 일반 Codex CLI 터미널 세션은 사용자가 새로 시작해야 합니다.
+async function switchCodexAccount(profileKey) {
+  try {
+    showCodexAccountBubble(
+      "Codex Desktop App을 멈추고 계정 전환을 준비하는 중입니다."
+    );
+
+    let stopError = null;
+    try {
+      await stopCodexDesktopApp();
+    } catch (error) {
+      stopError = error;
+      appendDebugLog(`Codex Desktop stop failed before switch: ${error.message || String(error)}`);
+    }
+
+    try {
+      const result = codexAccountSwitcher.switchToProfile(profileKey);
+      refreshTrayMenu();
+
+      let launchText = "Codex Desktop App 재실행을 요청했습니다.";
+      try {
+        const restartResult = await launchCodexDesktopApp();
+        launchText = restartResult.skipped
+          ? "재시작 설정이 꺼져 있어 auth만 교체했습니다."
+          : "Codex Desktop App 재실행을 요청했습니다.";
+      } catch (launchError) {
+        launchText = `auth 교체는 완료됐지만 Codex Desktop 재실행은 실패했습니다.\n${launchError.message || String(launchError)}`;
+        appendDebugLog(`Codex Desktop launch failed after switch: ${launchError.message || String(launchError)}`);
+      }
+
+      const stopText = stopError
+        ? `Codex Desktop 종료 확인은 실패했지만 auth 교체는 진행했습니다.\n${stopError.message || String(stopError)}\n`
+        : "";
+
+      showCodexAccountBubble(
+        `"${result.profile.label}" 계정으로 전환했습니다.\n${stopText}${launchText}\n열려 있던 Codex CLI 터미널은 새로 시작해야 적용됩니다.`
+      );
+    } catch (switchError) {
+      showCodexAccountBubble(
+        `Codex auth 전환에 실패했습니다.\n${switchError.message || String(switchError)}`
+      );
+    }
+  } catch (error) {
+    showCodexAccountBubble(
+      `Codex 계정을 전환하지 못했어요.\n${error.message || String(error)}`
+    );
+  }
+}
+
+// 트레이/우클릭 메뉴에서도 같은 기능을 쓸 수 있게 작은 서브메뉴를 만듭니다.
+function buildCodexAccountSubmenu() {
+  const profiles = codexAccountSwitcher.listProfiles();
+  const current = codexAccountSwitcher.getCurrentAccountSummary();
+  const readyProfiles = profiles.filter((profile) => profile.hasAuth);
+  const switchItems =
+    profiles.length > 0
+      ? [
+          {
+            label: "프로필 전환",
+            submenu: profiles.map((profile) => ({
+              label: formatCodexAccountLabel(profile),
+              type: "radio",
+              checked: profile.active,
+              enabled: profile.hasAuth,
+              click: () => switchCodexAccount(profile.key),
+            })),
+          },
+        ]
+      : [
+          {
+            label: "저장된 계정 없음",
+            enabled: false,
+          },
+        ];
+
+  return [
+    {
+      label: current.hasAuth ? `현재: ${current.label}` : "현재: 로그인 정보 없음",
+      enabled: false,
+    },
+    { type: "separator" },
+    {
+      label: "새 계정 로그인",
+      click: openCodexLoginTerminal,
+    },
+    {
+      label: "현재 계정 저장",
+      enabled: current.hasAuth,
+      click: saveCurrentCodexAccount,
+    },
+    {
+      label: "Codex Desktop 재실행",
+      enabled: current.hasAuth,
+      click: restartCurrentCodexDesktopApp,
+    },
+    {
+      label: readyProfiles.length > 0 ? `로그인된 프로필 ${readyProfiles.length}개` : "로그인된 프로필 없음",
+      enabled: false,
+    },
+    ...switchItems,
+  ];
+}
+
 // 시스템 트레이 메뉴는 창이 투명해져서 펫 우클릭 메뉴를 못 여는 상황에서도 접근할 수 있는 안전장치입니다.
 function buildTrayMenu() {
   const isPetVisible = Boolean(petWindow && !petWindow.isDestroyed() && petWindow.isVisible());
 
   return Menu.buildFromTemplate([
     {
-      label: "CodexPet 보이기",
+      label: "CodePet 보이기",
       enabled: !isPetVisible,
       click: showPetWindowFromTray,
     },
     {
-      label: "CodexPet 숨기기",
+      label: "CodePet 숨기기",
       enabled: isPetVisible,
       click: hidePetWindowToTray,
     },
@@ -649,6 +1169,10 @@ function buildTrayMenu() {
         showPetWindowFromTray();
         showUsageBubble();
       },
+    },
+    {
+      label: "Codex 계정",
+      submenu: buildCodexAccountSubmenu(),
     },
     {
       label: "펫 바꾸기",
@@ -676,7 +1200,7 @@ function buildTrayMenu() {
 // 트레이 메뉴는 현재 표시 상태, 일시정지 상태, 펫 선택 상태를 반영해야 하므로 상태가 바뀔 때마다 다시 만듭니다.
 function refreshTrayMenu() {
   if (!tray) return;
-  tray.setToolTip("CodexPet");
+  tray.setToolTip("CodePet");
   tray.setContextMenu(buildTrayMenu());
 }
 
@@ -692,7 +1216,7 @@ function createTray() {
 }
 
 // 창을 숨기면 앱은 트레이에 남습니다.
-// 사용자가 창을 찾지 못하는 상황에서도 트레이의 "CodexPet 보이기" 또는 "완전 종료"를 쓸 수 있습니다.
+// 사용자가 창을 찾지 못하는 상황에서도 트레이의 "CodePet 보이기" 또는 "완전 종료"를 쓸 수 있습니다.
 function hidePetWindowToTray() {
   stopMovementLoop();
   hideBubble();
@@ -756,6 +1280,10 @@ function showContextMenu() {
     {
       label: "Codex 사용량 보기",
       click: showUsageBubble,
+    },
+    {
+      label: "Codex 계정",
+      submenu: buildCodexAccountSubmenu(),
     },
     {
       label: "펫 바꾸기",
@@ -972,7 +1500,7 @@ function rateWindowLabel(windowMinutes) {
   return `${windowMinutes}분 한도`;
 }
 
-// resets_at(unix 초)을 "7/3 14:22 (3시간 12분 후 초기화)" 형태로 만듭니다.
+// reset_at/resets_at(unix 초)을 "7/3 14:22 (3시간 12분 후 초기화)" 형태로 만듭니다.
 function formatResetInfo(resetsAtSec) {
   if (!Number.isFinite(resetsAtSec)) return "초기화 정보 없음";
 
@@ -998,7 +1526,13 @@ function formatResetInfo(resetsAtSec) {
   return `${clock} (${relative})`;
 }
 
-// codex-watcher가 준 rate_limits를 말풍선 렌더링용 데이터로 바꿉니다.
+// Codex 버전에 따라 reset_at 또는 resets_at으로 들어오므로 화면 로직에서는 이 helper만 사용합니다.
+function getResetAtSec(rateWindow) {
+  const resetAt = Number(rateWindow?.resets_at ?? rateWindow?.reset_at);
+  return Number.isFinite(resetAt) ? resetAt : null;
+}
+
+// 현재 live ~/.codex/auth.json의 토큰으로 직접 조회한 rate_limits를 말풍선 렌더링용 데이터로 바꿉니다.
 function buildUsageBubbleData(usage) {
   const { rateLimits, recordedAt } = usage;
   const gauges = [];
@@ -1008,20 +1542,20 @@ function buildUsageBubbleData(usage) {
 
     // 기록 이후 초기화 시각이 이미 지났으면 실제 사용량은 0으로 리셋된 상태입니다.
     // 오래된 used_percent를 그대로 보여주면 오해를 부르므로 초기화된 것으로 표시합니다.
-    const resetPassed =
-      Number.isFinite(window.resets_at) && window.resets_at * 1000 <= Date.now();
+    const resetAtSec = getResetAtSec(window);
+    const resetPassed = Number.isFinite(resetAtSec) && resetAtSec * 1000 <= Date.now();
 
     gauges.push({
       label: rateWindowLabel(window.window_minutes),
       usedPercent: resetPassed ? 0 : Number(window.used_percent) || 0,
-      resetText: resetPassed
-        ? "이미 초기화됨 (Codex 실행 시 갱신)"
-        : formatResetInfo(window.resets_at),
+      resetText: resetPassed ? "이미 초기화됨" : formatResetInfo(resetAtSec),
     });
   }
 
   const footerParts = [];
-  if (rateLimits.plan_type) footerParts.push(`플랜: ${rateLimits.plan_type}`);
+  const account = usage.profile || codexAccountSwitcher.getCurrentAccountSummary();
+  const planType = rateLimits.plan_type || account.planType;
+  if (planType) footerParts.push(`플랜: ${planType}`);
   if (recordedAt) {
     const recorded = new Date(recordedAt);
     if (!Number.isNaN(recorded.getTime())) {
@@ -1030,29 +1564,46 @@ function buildUsageBubbleData(usage) {
     }
   }
 
+  footerParts.push(
+    account.hasAuth === false ? "계정: 없음" : `계정: ${account.displayId || account.shortId || account.label}`
+  );
+  if (usage.source) footerParts.push(`소스: ${usage.source}`);
+
   return {
     kind: "usage",
     title: "Codex 사용량",
     gauges,
     footer: footerParts.join(" · "),
+    actions: buildCodexAccountActions(),
   };
 }
 
-// 더블클릭 시 호출됩니다. 사용량 말풍선을 잠시 보여준 뒤,
-// Codex가 아직 작업 중이면 작업 말풍선으로 되돌립니다.
-function showUsageBubble() {
-  const usage = codexWatcher.getUsage();
+// 더블클릭 시 호출됩니다. 로그/세션 캐시는 쓰지 않고 현재 live auth로 즉시 조회합니다.
+async function showUsageBubble() {
+  showBubble({
+    kind: "activity",
+    title: "Codex 사용량",
+    busy: true,
+    text: "현재 선택된 Codex 프로필의 사용량을 조회하는 중입니다.",
+    actions: buildCodexAccountActions(),
+  });
 
-  const data = usage
-    ? buildUsageBubbleData(usage)
-    : {
-        kind: "activity",
-        title: "Codex 사용량",
-        busy: false,
-        text: "사용량 기록을 찾지 못했어요.\nCodex를 한 번 실행하면 표시됩니다.",
-      };
+  try {
+    const usage = await codexAccountSwitcher.fetchCurrentUsage();
+    const data = buildUsageBubbleData(usage);
+    showBubble(data);
+    maybeWarnUsage(usage);
+  } catch (error) {
+    const current = codexAccountSwitcher.getCurrentAccountSummary();
+    showBubble({
+      kind: "activity",
+      title: "Codex 사용량",
+      busy: false,
+      text: `현재 프로필: ${current.label}\n사용량을 직접 조회하지 못했습니다.\n${error.message || String(error)}`,
+      actions: buildCodexAccountActions(),
+    });
+  }
 
-  showBubble(data);
   bubbleHideTimer = setTimeout(() => {
     if (codexWatcher.working && lastActivityBubble) {
       showBubble(lastActivityBubble);
@@ -1136,10 +1687,8 @@ function registerCodexWatcher() {
     showBubble(lastActivityBubble);
   });
 
-  // 사용량이 갱신될 때마다 한도 임박 여부를 확인합니다.
-  codexWatcher.on("usage-updated", (usage) => {
-    maybeWarnUsage(usage);
-  });
+  // usage-updated 이벤트는 세션/로그에서 나온 값이라 계정 전환 직후 이전 계정 기록일 수 있습니다.
+  // 한도 경고는 더블클릭 직접 조회 결과에만 연결합니다.
 }
 
 // 한도 사용률이 기준을 넘으면 초기화 주기당 한 번만 경고 말풍선을 띄웁니다.
@@ -1151,9 +1700,10 @@ function maybeWarnUsage(usage) {
     const window = rateLimits[key];
     if (!window) continue;
     if (!(Number(window.used_percent) >= USAGE_WARN_THRESHOLD_PERCENT)) continue;
-    if (usageWarnedResets[key] === window.resets_at) continue;
+    const resetAtSec = getResetAtSec(window);
+    if (usageWarnedResets[key] === resetAtSec) continue;
 
-    usageWarnedResets[key] = window.resets_at;
+    usageWarnedResets[key] = resetAtSec;
 
     // 작업 중이 아닐 때만 쓰러지는 모션을 재생합니다.
     // 작업 중에 재생하면 반응이 끝난 뒤 review 모션으로 돌아오지 않기 때문입니다.
@@ -1165,7 +1715,7 @@ function maybeWarnUsage(usage) {
       kind: "activity",
       title: "⚠️ Codex 한도 임박",
       busy: false,
-      text: `${rateWindowLabel(window.window_minutes)}를 ${Math.round(window.used_percent)}% 사용했어요.\n${formatResetInfo(window.resets_at)}`,
+      text: `${rateWindowLabel(window.window_minutes)}를 ${Math.round(window.used_percent)}% 사용했어요.\n${formatResetInfo(resetAtSec)}`,
     });
     bubbleHideTimer = setTimeout(() => {
       if (codexWatcher.working && lastActivityBubble) {
@@ -1322,6 +1872,24 @@ function registerIpcHandlers() {
   });
 
   ipcMain.on(BUBBLE_CHANNELS.DISMISS, hideBubble);
+  ipcMain.on(BUBBLE_CHANNELS.ACTION, (_event, actionId) => {
+    if (actionId === BUBBLE_ACTIONS.LOGIN_CODEX_ACCOUNT) {
+      openCodexLoginTerminal();
+      return;
+    }
+
+    if (actionId === BUBBLE_ACTIONS.SAVE_CODEX_ACCOUNT) {
+      saveCurrentCodexAccount();
+      return;
+    }
+
+    if (actionId === BUBBLE_ACTIONS.SWITCH_CODEX_ACCOUNT) {
+      showCodexAccountSwitchMenu();
+      return;
+    }
+
+    console.warn("[desktop-pet] Unknown bubble action ignored.", actionId);
+  });
 }
 
 // 앱 수명주기 진입점입니다.

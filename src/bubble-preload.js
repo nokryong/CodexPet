@@ -5,6 +5,7 @@ const BUBBLE_CHANNELS = Object.freeze({
   UPDATE: "bubble:update",
   RESIZE: "bubble:resize",
   DISMISS: "bubble:dismiss",
+  ACTION: "bubble:action",
 });
 
 contextBridge.exposeInMainWorld("bubbleApi", {
@@ -21,5 +22,10 @@ contextBridge.exposeInMainWorld("bubbleApi", {
   // 말풍선을 클릭하면 닫습니다.
   dismiss: () => {
     ipcRenderer.send(BUBBLE_CHANNELS.DISMISS);
+  },
+  // 말풍선 안의 버튼을 누르면 main process가 실제 동작을 처리합니다.
+  // renderer에는 토큰 파일 경로나 인증 정보를 절대 넘기지 않습니다.
+  sendAction: (actionId) => {
+    ipcRenderer.send(BUBBLE_CHANNELS.ACTION, actionId);
   },
 });

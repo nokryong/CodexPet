@@ -1,6 +1,6 @@
 // 말풍선 renderer입니다. main이 보내주는 데이터 형태는 두 가지입니다.
-//  - { kind: "usage", title, gauges: [{label, usedPercent, resetText}], footer }
-//  - { kind: "activity", title, busy, text }
+//  - { kind: "usage", title, gauges: [{label, usedPercent, resetText}], footer, actions }
+//  - { kind: "activity", title, busy, text, actions }
 // XSS를 피하려고 innerHTML 대신 DOM API + textContent만 사용합니다.
 const bubbleElement = document.querySelector("#bubble");
 
@@ -21,6 +21,34 @@ function fillClassFor(usedPercent) {
   if (usedPercent >= 90) return "fill danger";
   if (usedPercent >= 70) return "fill warn";
   return "fill";
+}
+
+// 말풍선 하단의 액션 버튼입니다.
+// 버튼 클릭은 말풍선 닫기 클릭으로 전파되지 않게 막고 main process로 actionId만 보냅니다.
+function renderActions(actions) {
+  if (!Array.isArray(actions) || actions.length === 0) return;
+
+  const actionRow = document.createElement("div");
+  actionRow.className = "actions";
+
+  for (const action of actions) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "action-button";
+    button.textContent = action.label || "실행";
+    button.disabled = Boolean(action.disabled);
+
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      if (!action.disabled && action.id) {
+        window.bubbleApi.sendAction(action.id);
+      }
+    });
+
+    actionRow.appendChild(button);
+  }
+
+  bubbleElement.appendChild(actionRow);
 }
 
 function renderUsage(data) {
@@ -61,6 +89,8 @@ function renderUsage(data) {
     footer.textContent = data.footer;
     bubbleElement.appendChild(footer);
   }
+
+  renderActions(data.actions);
 }
 
 function renderActivity(data) {
@@ -70,6 +100,8 @@ function renderActivity(data) {
   body.className = "body-text";
   body.textContent = data.text || "";
   bubbleElement.appendChild(body);
+
+  renderActions(data.actions);
 }
 
 window.bubbleApi.onUpdate((data) => {

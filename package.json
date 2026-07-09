@@ -1,8 +1,8 @@
 {
-  "name": "codex-pet",
+  "name": "code-pet",
   "version": "0.1.0",
   "private": true,
-  "description": "Codex-linked transparent CodexPet overlay for Windows.",
+  "description": "Codex-linked transparent CodePet overlay for Windows.",
   "main": "src/main.js",
   "scripts": {
     "start": "electron .",
@@ -10,8 +10,8 @@
     "dist": "electron-builder --win"
   },
   "build": {
-    "appId": "app.codex-pet.desktop",
-    "productName": "CodexPet",
+    "appId": "app.codepet.desktop",
+    "productName": "CodePet",
     "directories": {
       "output": "artifacts"
     },
@@ -34,7 +34,7 @@
       ]
     },
     "portable": {
-      "artifactName": "CodexPet-${version}.exe"
+      "artifactName": "CodePet-${version}.exe"
     }
   },
   "devDependencies": {
