@@ -1,0 +1,80 @@
+html,
+body {
+  width: 100vw;
+  height: 100vh;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  background: transparent;
+  user-select: none;
+}
+
+/* frameless transparent window에서는 전체 -webkit-app-region: drag를 쓰면 클릭/우클릭이 꼬일 수 있습니다. */
+body {
+  -webkit-app-region: no-drag;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+/* 실제 펫 표시 영역입니다.
+   spritesheet.webp는 1536x1872이고, 192x208 셀 8x9 grid로 배치되어 있습니다. */
+#pet {
+  width: 100%;
+  height: 100%;
+  cursor: grab;
+  touch-action: none;
+  position: absolute;
+  top: 0;
+  left: 0;
+}
+
+#pet-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+#resize-handle {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 16px;
+  height: 16px;
+  cursor: nwse-resize;
+  opacity: 0;
+  transition: opacity 0.2s;
+  z-index: 10;
+  color: rgba(255, 255, 255, 0.8);
+  filter: drop-shadow(1px 1px 1px rgba(0,0,0,0.8));
+}
+
+body:hover #resize-handle {
+  opacity: 1;
+}
+
+/* 드래그 중 커서를 바꿔 사용자가 창을 잡고 있다는 느낌을 줍니다. */
+#pet:active {
+  cursor: grabbing;
+}
+
+/* 내장 기본 spritesheet.webp가 없을 때 표시하는 작은 오류 화면입니다. */
+#error {
+  box-sizing: border-box;
+  width: 100%;
+  height: 100%;
+  padding: 12px;
+  display: grid;
+  place-items: center;
+  background: rgba(20, 20, 20, 0.82);
+  color: #fff;
+  font-size: 12px;
+  line-height: 1.45;
+  text-align: center;
+  word-break: break-word;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+}
+
+/* hidden 속성이 붙어 있을 때는 오류 영역을 완전히 숨깁니다. */
+#error[hidden] {
+  display: none;
+}

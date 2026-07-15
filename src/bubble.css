@@ -1,0 +1,270 @@
+:root {
+  color-scheme: light;
+  --bubble-bg: rgba(255, 255, 255, 0.9);
+  --bubble-ink: #0f172a;
+  --bubble-muted: #475569;
+  --bubble-border: rgba(15, 23, 42, 0.12);
+  --bubble-line: rgba(15, 23, 42, 0.08);
+  --bubble-accent: #0f766e;
+  --bubble-accent-soft: rgba(15, 118, 110, 0.08);
+  --bubble-hover: rgba(15, 23, 42, 0.03);
+  --bubble-track: rgba(15, 23, 42, 0.08);
+  --bubble-warn: #ca8a04;
+  --bubble-danger: #dc2626;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bubble-bg: rgba(15, 23, 42, 0.9);
+  --bubble-ink: #f8fafc;
+  --bubble-muted: #94a3b8;
+  --bubble-border: rgba(255, 255, 255, 0.15);
+  --bubble-line: rgba(255, 255, 255, 0.1);
+  --bubble-accent: #2dd4bf;
+  --bubble-accent-soft: rgba(45, 212, 191, 0.12);
+  --bubble-hover: rgba(255, 255, 255, 0.04);
+  --bubble-track: rgba(255, 255, 255, 0.12);
+  --bubble-warn: #f59e0b;
+  --bubble-danger: #f87171;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  background: transparent;
+  font-family: var(--user-font, "Segoe UI Variable"), "Segoe UI", system-ui, sans-serif;
+  user-select: none;
+}
+
+#root {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.bubble {
+  box-sizing: border-box;
+  width: calc(100% - 10px);
+  max-height: 411px;
+  overflow-y: auto;
+  padding: 12px 14px;
+  border: 1.5px solid var(--bubble-border);
+  border-radius: 12px;
+  background: var(--bubble-bg);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  color: var(--bubble-ink);
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1.5;
+  scrollbar-width: none;
+}
+
+.bubble::-webkit-scrollbar {
+  display: none;
+}
+
+.bubble.clickable {
+  border-color: var(--bubble-accent);
+}
+
+.bubble.clickable:hover,
+.activity-section.clickable:hover {
+  background: var(--bubble-hover);
+}
+
+.tail {
+  width: 0;
+  height: 0;
+  border-top: 7px solid var(--bubble-bg);
+  border-right: 7px solid transparent;
+  border-left: 7px solid transparent;
+  margin-top: -1.5px;
+}
+
+.title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+  font-family: var(--user-font, "Segoe UI Variable Display"), "Segoe UI", system-ui, sans-serif;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  text-transform: uppercase;
+  color: var(--bubble-accent);
+}
+
+.title .dot {
+  width: 5px;
+  height: 5px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--bubble-accent);
+}
+
+.title .dot.busy {
+  background: var(--bubble-warn);
+  animation: pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% {
+    opacity: 0.5;
+    transform: scale(0.9);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.1);
+  }
+}
+
+.body-text,
+.activity-row-label {
+  color: var(--bubble-ink);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.activity-section + .activity-section {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1.5px solid var(--bubble-line);
+}
+
+.activity-row {
+  min-height: 18px;
+  display: flex;
+  align-items: center;
+  border-radius: 4px;
+}
+
+.activity-row-label {
+  overflow: hidden;
+  color: var(--bubble-accent);
+  font-size: 11px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.activity-section-body {
+  display: -webkit-box;
+  max-height: 36px;
+  margin-top: 3px;
+  overflow: hidden;
+  color: var(--bubble-ink);
+  font-size: 11px;
+  line-height: 1.45;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.gauge {
+  margin-bottom: 10px;
+}
+
+.gauge:last-child {
+  margin-bottom: 0;
+}
+
+.gauge .row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 4px;
+}
+
+.gauge .pct {
+  color: var(--bubble-accent);
+  font-weight: 700;
+}
+
+.gauge .bar {
+  height: 4px;
+  overflow: hidden;
+  border-radius: 2px;
+  background: var(--bubble-track);
+}
+
+.gauge .fill {
+  height: 100%;
+  border-radius: inherit;
+  background: var(--bubble-accent);
+}
+
+.gauge .fill.warn {
+  background: var(--bubble-warn);
+}
+
+.gauge .fill.danger {
+  background: var(--bubble-danger);
+}
+
+.gauge .reset,
+.footer {
+  margin-top: 4px;
+  color: var(--bubble-muted);
+  font-size: 10px;
+}
+
+.footer {
+  margin-top: 8px;
+  line-height: 1.4;
+  border-top: 1.5px solid var(--bubble-line);
+  padding-top: 6px;
+}
+
+.actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.action-button {
+  min-width: 0;
+  flex: 1;
+  padding: 5px 10px;
+  border: 1.5px solid var(--bubble-border);
+  border-radius: 6px;
+  background: var(--bubble-accent-soft);
+  color: var(--bubble-accent);
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.25;
+  transition: all 120ms ease;
+}
+
+.action-button:hover {
+  border-color: var(--bubble-accent);
+  background: var(--bubble-accent);
+  color: #ffffff;
+}
+
+.action-button:focus-visible {
+  outline: 2px solid var(--bubble-accent);
+  outline-offset: 2px;
+}
+
+.action-button:disabled {
+  cursor: default;
+  opacity: 0.4;
+  border-color: var(--bubble-border);
+  background: transparent;
+  color: var(--bubble-muted);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bubble,
+  .action-button {
+    transition: none;
+  }
+
+  .title .dot.busy {
+    animation: none;
+  }
+}

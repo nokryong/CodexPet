@@ -1,13 +1,14 @@
 {
   "name": "code-pet",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "private": true,
-  "description": "Codex-linked transparent CodePet overlay for Windows.",
+  "description": "Multi-provider desktop companion for Codex, Antigravity, and Claude.",
   "main": "src/main.js",
   "scripts": {
     "start": "electron .",
     "dev": "electron .",
-    "dist": "electron-builder --win"
+    "test": "node --test",
+    "dist": "node scripts/build.js"
   },
   "build": {
     "appId": "app.codepet.desktop",
@@ -17,7 +18,6 @@
     },
     "files": [
       "src/**/*",
-      "assets/**/*",
       "build/icon.ico",
       "package.json"
     ],

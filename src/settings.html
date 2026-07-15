@@ -1,0 +1,278 @@
+<!doctype html>
+<html lang="ko" data-theme="light">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>CodePet 설정</title>
+    <link rel="stylesheet" href="./settings.css" />
+  </head>
+  <body>
+    <div class="titlebar">
+      <div class="titlebar-drag">
+        <span class="titlebar-logo"><i></i><i></i></span>
+        <span class="titlebar-title">CodePet 설정</span>
+      </div>
+      <div class="titlebar-controls">
+        <button class="titlebar-btn btn-minimize" id="btn-minimize" type="button" aria-label="최소화">
+          <svg viewBox="0 0 10 10"><path d="M 1,5 L 9,5" /></svg>
+        </button>
+        <button class="titlebar-btn btn-maximize" id="btn-maximize" type="button" aria-label="최대화">
+          <svg class="icon-maximize" viewBox="0 0 10 10"><path d="M 2,2 L 8,2 L 8,8 L 2,8 Z" /></svg>
+          <svg class="icon-restore" viewBox="0 0 10 10" style="display: none;"><path d="M 2,4 L 6,4 L 6,8 L 2,8 Z M 4,4 L 4,2 L 8,2 L 8,6 L 6,6" /></svg>
+        </button>
+        <button class="titlebar-btn btn-close" id="btn-close" type="button" aria-label="닫기">
+          <svg viewBox="0 0 10 10"><path d="M 2,2 L 8,8 M 8,2 L 2,8" /></svg>
+        </button>
+      </div>
+    </div>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand-lockup" aria-label="CodePet 0.3">
+          <span class="brand-mark" aria-hidden="true"><i></i><i></i></span>
+          <span>
+            <strong>CodePet</strong>
+            <small>WORKSPACE COMPANION</small>
+          </span>
+        </div>
+
+        <nav class="settings-nav" aria-label="설정 섹션" role="tablist">
+          <button
+            class="nav-item is-active"
+            id="nav-general"
+            type="button"
+            role="tab"
+            aria-selected="true"
+            aria-controls="general"
+            data-section="general"
+            data-label="일반 및 모양"
+          >
+            <span class="nav-index">01</span>
+            <span>일반 및 모양</span>
+          </button>
+          <button
+            class="nav-item"
+            id="nav-accounts"
+            type="button"
+            role="tab"
+            aria-selected="false"
+            aria-controls="accounts"
+            data-section="accounts"
+            data-label="계정"
+            tabindex="-1"
+          >
+            <span class="nav-index">02</span>
+            <span>계정</span>
+          </button>
+          <button
+            class="nav-item"
+            id="nav-usage"
+            type="button"
+            role="tab"
+            aria-selected="false"
+            aria-controls="usage"
+            data-section="usage"
+            data-label="사용량"
+            tabindex="-1"
+          >
+            <span class="nav-index">03</span>
+            <span>사용량</span>
+          </button>
+        </nav>
+
+        <div class="sidebar-foot">
+          <span class="version">VERSION 0.3.0</span>
+        </div>
+      </aside>
+
+      <main class="workspace">
+        <header class="workspace-bar">
+          <p>SETTINGS <span>/</span> <strong id="section-label">일반 및 모양</strong></p>
+          <span class="local-badge"><i></i> 이 PC에 저장</span>
+        </header>
+
+        <div class="toast" id="toast" role="alert" aria-live="assertive" hidden></div>
+
+        <section
+          class="panel is-active"
+          id="general"
+          role="tabpanel"
+          aria-labelledby="nav-general"
+          tabindex="0"
+        >
+          <header class="panel-heading">
+            <p class="eyebrow">APPEARANCE &amp; BEHAVIOR</p>
+            <h1>내 화면, 내 방식대로</h1>
+          </header>
+
+          <fieldset class="setting-section theme-section">
+            <legend>화면 테마</legend>
+            <div class="theme-grid">
+              <label class="theme-option">
+                <input type="radio" name="theme" value="light" checked />
+                <span class="theme-preview theme-preview-light" aria-hidden="true">
+                  <i></i><b></b><em></em>
+                </span>
+                <span><strong>라이트</strong><small>밝은 화면</small></span>
+                <i class="choice-mark" aria-hidden="true"></i>
+              </label>
+              <label class="theme-option">
+                <input type="radio" name="theme" value="dark" />
+                <span class="theme-preview theme-preview-dark" aria-hidden="true">
+                  <i></i><b></b><em></em>
+                </span>
+                <span><strong>다크</strong><small>어두운 화면</small></span>
+                <i class="choice-mark" aria-hidden="true"></i>
+              </label>
+              <label class="theme-option">
+                <input type="radio" name="theme" value="system" />
+                <span class="theme-preview theme-preview-system" aria-hidden="true">
+                  <i></i><b></b><em></em>
+                </span>
+                <span><strong>시스템</strong><small>Windows 설정</small></span>
+                <i class="choice-mark" aria-hidden="true"></i>
+              </label>
+            </div>
+          </fieldset>
+
+          <fieldset class="setting-section color-section">
+            <legend>말풍선 색상</legend>
+            <p class="section-help">말풍선의 배경 색상과 글자 색상을 직접 지정합니다.</p>
+            <div class="color-grid">
+              <div class="color-field">
+                <span class="color-label">배경 색상</span>
+                <div class="color-input-wrapper">
+                  <input type="color" id="bubble-bg-picker" />
+                  <input type="text" id="bubble-bg-color" placeholder="#ffffff" maxlength="9" />
+                </div>
+              </div>
+              <div class="color-field">
+                <span class="color-label">글자 색상</span>
+                <div class="color-input-wrapper">
+                  <input type="color" id="bubble-text-picker" />
+                  <input type="text" id="bubble-text-color" placeholder="#09090b" maxlength="7" />
+                </div>
+              </div>
+            </div>
+          </fieldset>
+
+          <section class="setting-section font-section" aria-labelledby="font-title">
+            <div class="section-title-row">
+              <div>
+                <h2 id="font-title">설치된 글꼴</h2>
+                <p class="section-help">이 PC에 설치된 글꼴을 사용합니다.</p>
+              </div>
+              <span class="count-label" id="font-count">불러오는 중</span>
+            </div>
+
+            <div class="font-workbench">
+              <div class="font-picker">
+                <label for="font-search">글꼴 찾기</label>
+                <div class="search-field">
+                  <span aria-hidden="true"></span>
+                  <input
+                    id="font-search"
+                    type="search"
+                    autocomplete="off"
+                    placeholder="글꼴 이름"
+                  />
+                </div>
+                <label class="sr-only" for="font">설치된 글꼴 목록</label>
+                <select id="font" size="7" aria-describedby="font-note">
+                  <option value="">시스템 기본</option>
+                </select>
+              </div>
+
+              <div class="font-preview" id="font-preview" aria-live="polite">
+                <span class="preview-label">LIVE PREVIEW</span>
+                <strong>오늘의 작업을<br />편안하게.</strong>
+                <p>CodePet이 작업 흐름을 알려드려요.</p>
+                <span class="preview-meta" id="font-preview-name">시스템 기본</span>
+              </div>
+            </div>
+            <p class="inline-note" id="font-note">삭제된 글꼴은 시스템 기본값으로 돌아갑니다.</p>
+          </section>
+
+          <section class="setting-section" aria-labelledby="pet-behavior-title">
+            <div class="section-title-row">
+              <h2 id="pet-behavior-title">펫과 알림</h2>
+            </div>
+            <div class="control-grid">
+              <label class="control-field" for="pet">
+                <span>사용할 펫</span>
+                <select id="pet"></select>
+              </label>
+              <label class="control-field" for="bubble-mode">
+                <span>활동 말풍선</span>
+                <select id="bubble-mode">
+                  <option value="full">전체 내용</option>
+                  <option value="status">상태만</option>
+                  <option value="off">끄기</option>
+                </select>
+              </label>
+              <label class="switch-row" for="follow">
+                <span><strong>마우스 따라가기</strong></span>
+                <input id="follow" type="checkbox" />
+                <i aria-hidden="true"></i>
+              </label>
+              <label class="switch-row" for="autostart">
+                <span><strong>Windows 시작 시 실행</strong></span>
+                <input id="autostart" type="checkbox" />
+                <i aria-hidden="true"></i>
+              </label>
+            </div>
+          </section>
+
+          <footer class="panel-actions panel-actions-end">
+            <button class="button button-primary" id="save" type="button">변경 사항 적용</button>
+          </footer>
+        </section>
+
+        <section
+          class="panel"
+          id="accounts"
+          role="tabpanel"
+          aria-labelledby="nav-accounts"
+          tabindex="0"
+          hidden
+        >
+          <header class="panel-heading">
+            <p class="eyebrow">PROVIDERS</p>
+            <h1>계정</h1>
+          </header>
+
+          <section class="setting-section" aria-labelledby="provider-list-title">
+            <div class="section-title-row">
+              <h2 id="provider-list-title">연결된 계정</h2>
+              <button class="text-button" id="refresh-accounts" type="button">새로고침</button>
+            </div>
+            <div class="provider-groups" id="provider-groups"></div>
+          </section>
+        </section>
+
+        <section
+          class="panel"
+          id="usage"
+          role="tabpanel"
+          aria-labelledby="nav-usage"
+          tabindex="0"
+          hidden
+        >
+          <header class="panel-heading">
+            <p class="eyebrow">LIMITS</p>
+            <h1>사용량</h1>
+          </header>
+
+          <section class="setting-section" aria-labelledby="usage-list-title">
+            <div class="section-title-row">
+              <h2 id="usage-list-title">한도</h2>
+              <button class="text-button" id="refresh-usage" type="button">새로고침</button>
+            </div>
+            <div class="usage-grid" id="usage-cards"></div>
+          </section>
+        </section>
+      </main>
+    </div>
+
+    <script src="./settings.js"></script>
+  </body>
+</html>
