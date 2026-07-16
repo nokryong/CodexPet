@@ -11,7 +11,17 @@ function fingerprint(value) {
     : null;
 }
 
+function normalizeEmail(value) {
+  return typeof value === "string" && value.trim() ? value.trim().toLocaleLowerCase("en") : null;
+}
+
 function secretIdentity(secret) {
+  const claudeRefreshExpiry = Number(secret?.claudeAiOauth?.refreshTokenExpiresAt);
+  if (Number.isFinite(claudeRefreshExpiry) && claudeRefreshExpiry > 0) {
+    // Claude OAuth는 refresh token을 회전시키면서도 같은 로그인 세션의 만료 시각을 유지합니다.
+    // 서버 응답의 밀리초 단위 흔들림만 흡수해 한 계정이 여러 프로필로 늘어나는 것을 막습니다.
+    return `claude-session:${Math.floor(claudeRefreshExpiry / 10000)}`;
+  }
   return (
     secret?.refresh_token ||
     secret?.refreshToken ||
@@ -23,6 +33,11 @@ function secretIdentity(secret) {
 
 function secretFingerprint(secret) {
   return fingerprint(secretIdentity(secret));
+}
+
+function profileFingerprint(secret, email) {
+  const normalizedEmail = normalizeEmail(email);
+  return fingerprint(normalizedEmail ? `email:${normalizedEmail}` : secretIdentity(secret));
 }
 
 function atomicWrite(file, value) {
@@ -87,7 +102,7 @@ class ProviderProfileStore {
     fs.rmSync(this.activePath, { force: true });
   }
 
-  list() {
+  records() {
     let files;
     try {
       files = fs.readdirSync(this.dir).filter((name) => name.endsWith(".json"));
@@ -95,40 +110,72 @@ class ProviderProfileStore {
       return [];
     }
 
-    const activeKey = this.getActiveKey();
-    const profiles = [];
+    const records = [];
     for (const file of files) {
       try {
         const record = JSON.parse(fs.readFileSync(path.join(this.dir, file), "utf8"));
         if (!PROFILE_KEY.test(record?.key || "") || !record.secret) continue;
-        profiles.push(safeProfile(record, record.key === activeKey));
+        records.push(record);
       } catch {
         // 손상된 프로필 하나 때문에 정상 프로필까지 숨기지 않습니다.
       }
     }
+    return records;
+  }
+
+  list() {
+    const activeKey = this.getActiveKey();
+    const profiles = this.records().map((record) => safeProfile(record, record.key === activeKey));
     return profiles.sort(
       (left, right) => Number(right.active) - Number(left.active) || left.label.localeCompare(right.label)
     );
   }
 
   save({ secret, email, plan, active = false }) {
-    const key = secretFingerprint(secret);
+    const normalizedEmail = normalizeEmail(email);
+    const secretKey = secretFingerprint(secret);
+    const key = profileFingerprint(secret, normalizedEmail);
     if (!key) throw new Error("로그인 정보를 찾지 못했습니다.");
-    const existing = this.get(key);
-    const normalizedEmail = typeof email === "string" && email.trim() ? email.trim() : existing?.email;
+
+    const activeKey = this.getActiveKey();
+    const candidates = this.records().filter((record) =>
+      record.key === key ||
+      (secretKey &&
+        secretFingerprint(record.secret) === secretKey &&
+        (!normalizedEmail || !record.email || normalizeEmail(record.email) === normalizedEmail)) ||
+      (normalizedEmail && normalizeEmail(record.email) === normalizedEmail)
+    );
+    const existing = candidates.find((record) => record.key === activeKey) ||
+      candidates.find((record) => normalizeEmail(record.email) === normalizedEmail) ||
+      candidates[0] ||
+      null;
+    const preservedEmail = normalizedEmail || normalizeEmail(existing?.email);
     const normalizedPlan = typeof plan === "string" && plan.trim() ? plan.trim() : existing?.plan;
     const record = {
       key,
-      label: normalizedEmail || existing?.label || `계정 ${key.slice(0, 6)}`,
-      email: normalizedEmail || null,
+      label: preservedEmail || existing?.label || `계정 ${key.slice(0, 6)}`,
+      email: preservedEmail || null,
       plan: normalizedPlan || null,
       secret,
       savedAt: existing?.savedAt || new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
     atomicWrite(path.join(this.dir, `${key}.json`), record);
-    if (active) this.setActive(key);
-    return safeProfile(record, active || this.getActiveKey() === key);
+    for (const candidate of candidates) {
+      if (candidate.key !== key) {
+        fs.rmSync(path.join(this.dir, `${candidate.key}.json`), { force: true });
+      }
+    }
+
+    const remainsActive = active || candidates.some((candidate) => candidate.key === activeKey);
+    if (remainsActive) this.setActive(key);
+    return safeProfile(record, remainsActive || this.getActiveKey() === key);
+  }
+
+  findKeyBySecret(secret) {
+    const key = secretFingerprint(secret);
+    if (!key) return null;
+    return this.records().find((record) => secretFingerprint(record.secret) === key)?.key || null;
   }
 
   get(key) {
@@ -160,6 +207,8 @@ module.exports = {
   ProviderProfileStore,
   atomicWrite,
   fingerprint,
+  normalizeEmail,
+  profileFingerprint,
   safeProfile,
   secretFingerprint,
 };

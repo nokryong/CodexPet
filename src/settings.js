@@ -28,16 +28,13 @@ function quoteFontFamily(fontFamily) {
   return `"${escaped}"`;
 }
 
-function resolveLocalTheme(themeSource) {
-  if (themeSource !== "system") return themeSource === "dark" ? "dark" : "light";
-  return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+function createFontOption(label, value, fontFamily = "") {
+  const option = new Option(label, value);
+  option.style.fontFamily = fontFamily ? quoteFontFamily(fontFamily) : "var(--font-body)";
+  return option;
 }
 
 function applyAppearance(appearance, fontFamily = appearance?.fontFamily || "") {
-  const themeSource = appearance?.themeSource || "light";
-  const resolvedTheme = appearance?.resolvedTheme || resolveLocalTheme(themeSource);
-  rootElement.dataset.theme = resolvedTheme === "dark" ? "dark" : "light";
-
   const quotedFont = quoteFontFamily(fontFamily);
   if (quotedFont) {
     rootElement.style.setProperty("--user-font", quotedFont);
@@ -102,25 +99,28 @@ function replaceOptions(select, options, selectedValue) {
   select.value = selectedValue || "";
 }
 
-function setActiveThemeControl(themeSource) {
-  const target = [...document.querySelectorAll('input[name="theme"]')]
-    .find((input) => input.value === themeSource);
-  if (target) target.checked = true;
-}
+function resolveInstalledFontFamily(fontFamily) {
+  const requested = String(fontFamily || "").trim();
+  if (!requested) return "";
+  const exact = installedFonts.find(
+    (font) => font.toLocaleLowerCase("en") === requested.toLocaleLowerCase("en")
+  );
+  if (exact) return exact;
 
-function currentThemeSource() {
-  return document.querySelector('input[name="theme"]:checked')?.value || "light";
+  // 이전 버전은 Arial Bold처럼 개별 face 이름을 저장했습니다. 현재 목록은 CSS가 실제로
+  // 인식하는 family 이름만 제공하므로, 남아 있는 style 꼬리표를 한 번 걷어내 이관합니다.
+  const family = requested.replace(
+    /\s+(?:Regular|Roman|Book|Medium|SemiBold|DemiBold|Bold|Light|Thin|Black|Italic)$/i,
+    ""
+  );
+  return installedFonts.find(
+    (font) => font.toLocaleLowerCase("en") === family.toLocaleLowerCase("en")
+  ) || "";
 }
 
 function updateFontPreview() {
   $("#font-preview-name").textContent = selectedFont || "시스템 기본";
-  applyAppearance(
-    {
-      themeSource: currentThemeSource(),
-      resolvedTheme: resolveLocalTheme(currentThemeSource()),
-    },
-    selectedFont
-  );
+  applyAppearance(state?.appearance || {}, selectedFont);
 }
 
 function renderFonts() {
@@ -128,12 +128,12 @@ function renderFonts() {
   const filteredFonts = query
     ? installedFonts.filter((font) => font.toLocaleLowerCase("ko").includes(query))
     : installedFonts;
-  const options = [new Option("시스템 기본", "")];
+  const options = [createFontOption("시스템 기본", "")];
 
   if (selectedFont && !filteredFonts.includes(selectedFont)) {
-    options.push(new Option(`${selectedFont} · 현재`, selectedFont));
+    options.push(createFontOption(`${selectedFont} · 현재`, selectedFont, selectedFont));
   }
-  options.push(...filteredFonts.map((font) => new Option(font, font)));
+  options.push(...filteredFonts.map((font) => createFontOption(font, font, font)));
   if (query && filteredFonts.length === 0) {
     const empty = new Option("검색 결과 없음", "__empty__");
     empty.disabled = true;
@@ -149,8 +149,7 @@ function renderFonts() {
 
 function renderGeneral({ resetAppearance = false } = {}) {
   if (!state) return;
-  if (resetAppearance) selectedFont = state.appearance.fontFamily || "";
-  setActiveThemeControl(state.appearance.themeSource);
+  if (resetAppearance) selectedFont = resolveInstalledFontFamily(state.appearance.fontFamily);
   replaceOptions(
     $("#pet"),
     state.pets.map((pet) => new Option(pet.label, pet.key)),
@@ -165,7 +164,7 @@ function renderGeneral({ resetAppearance = false } = {}) {
   if (/^#[0-9a-fA-F]{6}$/.test(bgVal) || /^#[0-9a-fA-F]{3}$/.test(bgVal) || /^#[0-9a-fA-F]{8}$/.test(bgVal)) {
     $("#bubble-bg-picker").value = bgVal.slice(0, 7);
   } else {
-    $("#bubble-bg-picker").value = rootElement.dataset.theme === "dark" ? "#0f172a" : "#ffffff";
+    $("#bubble-bg-picker").value = "#ffffff";
   }
 
   const textVal = state.appearance.bubbleTextColor || "";
@@ -173,7 +172,7 @@ function renderGeneral({ resetAppearance = false } = {}) {
   if (/^#[0-9a-fA-F]{6}$/.test(textVal) || /^#[0-9a-fA-F]{3}$/.test(textVal)) {
     $("#bubble-text-picker").value = textVal.slice(0, 7);
   } else {
-    $("#bubble-text-picker").value = rootElement.dataset.theme === "dark" ? "#f8fafc" : "#09090b";
+    $("#bubble-text-picker").value = "#09090b";
   }
 
   renderFonts();
@@ -409,16 +408,11 @@ function registerAppearanceControls() {
     selectedFont = fontSelect.value;
     updateFontPreview();
   });
-  for (const input of document.querySelectorAll('input[name="theme"]')) {
-    input.addEventListener("change", updateFontPreview);
-  }
-
   $("#save").addEventListener("click", async (event) => {
     const button = event.currentTarget;
     setButtonBusy(button, true, "적용 중…");
     try {
       const response = await api.save({
-        themeSource: currentThemeSource(),
         fontFamily: selectedFont || null,
         petKey: $("#pet").value,
         activityBubbleMode: $("#bubble-mode").value,
@@ -477,9 +471,6 @@ function registerAppearanceUpdates() {
   api.onAppearance((appearance) => {
     applyAppearance(appearance, appearance?.fontFamily || selectedFont);
     if (state) state.appearance = { ...state.appearance, ...appearance };
-  });
-  window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
-    if (currentThemeSource() === "system") updateFontPreview();
   });
 }
 
@@ -575,7 +566,7 @@ async function initialize() {
       throw new Error(responseError(settingsResponse, "설정을 불러오지 못했습니다."));
     }
     state = settingsResponse.data;
-    selectedFont = state.appearance.fontFamily || "";
+    selectedFont = resolveInstalledFontFamily(state.appearance.fontFamily);
     renderAll({ resetAppearance: true });
     applyAppearance(state.appearance, selectedFont);
   } catch (error) {

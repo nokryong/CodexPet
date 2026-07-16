@@ -1,19 +1,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
-const {
-  normalizeThemeSource,
-  normalizeFontFamily,
-  quoteFontFamily,
-} = require("../src/appearance-settings");
-
-test("테마는 light, dark, system만 허용하고 기본값은 light다", () => {
-  assert.equal(normalizeThemeSource("light"), "light");
-  assert.equal(normalizeThemeSource("dark"), "dark");
-  assert.equal(normalizeThemeSource("system"), "system");
-  assert.equal(normalizeThemeSource("unknown"), "light");
-  assert.equal(normalizeThemeSource(null), "light");
-});
+const { normalizeFontFamily, quoteFontFamily } = require("../src/appearance-settings");
 
 test("글꼴은 실제 설치 목록의 안전한 패밀리명만 허용한다", () => {
   const installed = ["Malgun Gothic", "Arial"];

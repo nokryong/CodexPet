@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, Tray, nativeImage, ipcMain, screen, shell, nativeTheme } = require("electron");
+const { app, BrowserWindow, Menu, Tray, nativeImage, ipcMain, screen, shell } = require("electron");
 const { spawn, spawnSync, execFile } = require("node:child_process");
 const fs = require("node:fs");
 const os = require("node:os");
@@ -8,9 +8,11 @@ const { CodexWatcher } = require("./codex-watcher");
 const { AntigravityWatcher } = require("./antigravity-watcher");
 const { ClaudeWatcher } = require("./claude-watcher");
 const { ClaudeAccountSwitcher } = require("./claude-account-switcher");
+const { normalizeClaudeAccountMetadata } = require("./claude-account-metadata");
 const { AntigravityAccountSwitcher } = require("./antigravity-account-switcher");
 const {
   clearUsageCache,
+  fetchAntigravityIdentity,
   fetchClaudeUsage,
   fetchAntigravityUsage,
 } = require("./provider-usage");
@@ -22,9 +24,15 @@ const {
   normalizeWindowSize,
   restoreWindowGeometry,
 } = require("./window-geometry");
-const { normalizeThemeSource, normalizeFontFamily } = require("./appearance-settings");
+const { normalizeFontFamily } = require("./appearance-settings");
 const { buildAccountSubmenu } = require("./account-submenu");
 const { rateWindowLabel } = require("./codex-usage-label");
+const { commandNeedsShell, selectCommandPath } = require("./command-resolution");
+const { getInstalledFonts } = require("./installed-fonts");
+const {
+  movementPreferencesPatch,
+  normalizeMovementPreferences,
+} = require("./movement-preferences");
 
 app.commandLine.appendSwitch("disable-features", "CalculateNativeWinOcclusion");
 
@@ -191,7 +199,9 @@ function readSettings() {
 }
 
 function writeSettings(patch) {
-  const next = { ...readSettings(), ...patch };
+  const current = readSettings();
+  delete current.themeSource;
+  const next = { ...current, ...patch };
   try {
     fs.writeFileSync(getSettingsPath(), JSON.stringify(next, null, 2));
   } catch (error) {
@@ -433,6 +443,14 @@ const runtime = {
   pauseStates: new Map(),
   followMouse: false,
 };
+
+function restoreMovementPreferences() {
+  Object.assign(runtime, normalizeMovementPreferences(readSettings()));
+}
+
+function persistMovementPreferences() {
+  writeSettings(movementPreferencesPatch(runtime));
+}
 
 // 주어진 최소/최대 범위 사이에서 랜덤 시간을 뽑습니다.
 function randomBetween(min, max) {
@@ -765,6 +783,7 @@ function isAnyProviderWorking() {
 // 수동 Pause/Resume 메뉴 항목에서 자동 이동을 토글합니다.
 function toggleManualPause() {
   runtime.manualPaused = !runtime.manualPaused;
+  persistMovementPreferences();
 
   if (runtime.manualPaused) {
     clearTimeout(phaseTimer);
@@ -1034,10 +1053,7 @@ function resolveCommand(command, candidates = []) {
       timeout: 5000,
     });
     if (result.status !== 0) return null;
-    return String(result.stdout || "")
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .find(Boolean) || null;
+    return selectCommandPath(result.stdout, process.platform);
   } catch {
     return null;
   }
@@ -1106,14 +1122,20 @@ function getClaudeAuthStatus() {
     execFile(
       command,
       ["auth", "status", "--json"],
-      { encoding: "utf8", windowsHide: true, timeout: 8000, maxBuffer: 1024 * 1024 },
+      {
+        encoding: "utf8",
+        windowsHide: true,
+        timeout: 8000,
+        maxBuffer: 1024 * 1024,
+        shell: commandNeedsShell(command, process.platform),
+      },
       (error, stdout) => {
         if (error) {
           reject(new Error("Claude 로그인 상태를 확인하지 못했습니다."));
           return;
         }
         try {
-          resolve(JSON.parse(stdout));
+          resolve(normalizeClaudeAccountMetadata(JSON.parse(stdout)));
         } catch {
           reject(new Error("Claude 로그인 상태 형식이 올바르지 않습니다."));
         }
@@ -1489,6 +1511,7 @@ function quitApp() {
 // 마우스 따라가기 토글은 펫 메뉴와 트레이 메뉴가 같은 상태를 공유합니다.
 function toggleFollowMouse() {
   runtime.followMouse = !runtime.followMouse;
+  persistMovementPreferences();
 
   if (runtime.followMouse) {
     clearTimeout(phaseTimer);
@@ -2283,10 +2306,20 @@ async function startProviderLogin(provider) {
     let meta = {};
     try {
       const credential = await antigravityAccountSwitcher.read();
-      const current = await fetchAntigravityUsage({ credential, force: true });
-      meta = { email: current.email, plan: current.plan };
+      try {
+        const identity = await fetchAntigravityIdentity({ credential, force: true });
+        meta.email = identity.email;
+      } catch {
+        // 한도 API와 별개인 계정 조회가 막히면 기존 저장 메타데이터를 유지합니다.
+      }
+      try {
+        const current = await fetchAntigravityUsage({ credential, force: true });
+        meta = { email: current.email || meta.email, plan: current.plan };
+      } catch {
+        // 한도 조회가 막혀도 확인한 이메일과 현재 자격 증명은 저장할 수 있습니다.
+      }
     } catch {
-      // 사용량 조회가 막혀도 현재 자격 증명 자체는 저장할 수 있습니다.
+      // 처음 로그인하는 PC라면 저장할 현재 계정이 없습니다.
     }
     await antigravityAccountSwitcher.prepareLogin(meta);
     clearUsageCache("agy");
@@ -2416,7 +2449,7 @@ function createBubbleWindow() {
   createdWindow.webContents.on("did-finish-load", () => {
     if (bubbleWindow !== createdWindow) return;
     bubbleReady = true;
-    createdWindow.webContents.send("appearance:update", getThemePayload());
+    createdWindow.webContents.send("appearance:update", getAppearancePayload());
     clearBubbleLoadWatchdog();
     flushPendingBubbleData();
   });
@@ -2706,9 +2739,6 @@ function registerIpcHandlers() {
     const fonts = await getInstalledFonts();
     const patch = {};
 
-    if (Object.hasOwn(next, "themeSource")) {
-      patch.themeSource = normalizeThemeSource(next.themeSource);
-    }
     if (Object.hasOwn(next, "fontFamily")) {
       patch.fontFamily = normalizeFontFamily(next.fontFamily, fonts);
     }
@@ -2735,8 +2765,7 @@ function registerIpcHandlers() {
     }
 
     writeSettings(patch);
-    applyNativeThemeSource();
-    sendThemeToWindows();
+    sendAppearanceToWindows();
     refreshTrayMenu();
     return { ok: true, data: await getSettingsData() };
   });
@@ -2802,7 +2831,7 @@ function registerIpcHandlers() {
 
 // 앱 수명주기 진입점입니다.
 app.whenReady().then(() => {
-  applyNativeThemeSource();
+  restoreMovementPreferences();
   registerIpcHandlers();
   registerCodexWatcher();
   registerExternalWatcher(antigravityWatcher, "AGY");
@@ -2813,12 +2842,6 @@ app.whenReady().then(() => {
   if (process.argv.includes("--settings")) {
     openSettingsWindow();
   }
-  nativeTheme.on("updated", () => {
-    if (readSettings().themeSource === "system") {
-      sendThemeToWindows();
-    }
-  });
-
   // 사용량 풍선은 수동 호출이라 문제가 없지만, 대화 말풍선은 watcher가 시작되지 않으면 절대 뜨지 않습니다.
   // 그래서 말풍선 renderer 로드 여부와 무관하게 감시를 바로 시작하고, 표시 데이터는 showBubble()에서 큐잉합니다.
   codexWatcher.start();
@@ -2853,24 +2876,17 @@ app.on("window-all-closed", () => {
   }
 });
 
-function getThemePayload() {
+function getAppearancePayload() {
   const settings = readSettings();
-  const themeSource = settings.themeSource || "light";
-  let resolvedTheme = themeSource;
-  if (themeSource === "system") {
-    resolvedTheme = nativeTheme.shouldUseDarkColors ? "dark" : "light";
-  }
   return {
-    themeSource,
-    resolvedTheme,
     fontFamily: settings.fontFamily || "",
     bubbleBgColor: settings.bubbleBgColor || "",
     bubbleTextColor: settings.bubbleTextColor || "",
   };
 }
 
-function sendThemeToWindows() {
-  const payload = getThemePayload();
+function sendAppearanceToWindows() {
+  const payload = getAppearancePayload();
   if (petWindow && !petWindow.isDestroyed()) {
     petWindow.webContents.send("appearance:update", payload);
   }
@@ -2880,11 +2896,6 @@ function sendThemeToWindows() {
   if (settingsWindow && !settingsWindow.isDestroyed()) {
     settingsWindow.webContents.send("appearance:update", payload);
   }
-}
-
-function applyNativeThemeSource() {
-  const settings = readSettings();
-  nativeTheme.themeSource = settings.themeSource || "light";
 }
 
 function codexAccountRows() {
@@ -2918,10 +2929,25 @@ async function loadAntigravityProvider(forceUsage) {
     };
   }
 
+  let identity = {};
+  try {
+    identity = await fetchAntigravityIdentity({ credential, force: forceUsage });
+  } catch {
+    // 계정 조회가 막혀도 저장된 힌트와 한도 조회는 각각 계속 시도합니다.
+  }
+  try {
+    await antigravityAccountSwitcher.snapshotCurrent({ email: identity.email });
+  } catch {
+    // 로그인 정보 자체가 없으면 아래 한도 조회에서 로그인 오류로 처리합니다.
+  }
+
   let usage;
   try {
     const data = await fetchAntigravityUsage({ credential, force: forceUsage });
-    await antigravityAccountSwitcher.snapshotCurrent({ email: data.email, plan: data.plan });
+    await antigravityAccountSwitcher.snapshotCurrent({
+      email: data.email || identity.email,
+      plan: data.plan,
+    });
     usage = { id: "agy", label: "AGY", gauges: data.gauges };
   } catch {
     try {
@@ -2980,9 +3006,7 @@ async function getSettingsData({ forceUsage = false } = {}) {
 
   return {
     appearance: {
-      themeSource: normalizeThemeSource(settings.themeSource),
       fontFamily: settings.fontFamily || "",
-      resolvedTheme: nativeTheme.shouldUseDarkColors ? "dark" : "light",
       bubbleBgColor: settings.bubbleBgColor || "",
       bubbleTextColor: settings.bubbleTextColor || "",
     },
@@ -3000,46 +3024,6 @@ async function getSettingsData({ forceUsage = false } = {}) {
   };
 }
 
-let installedFontsPromise = null;
-
-function queryRegistryFonts(registryPath) {
-  return new Promise((resolve) => {
-    execFile(
-      "reg.exe",
-      ["query", registryPath],
-      { encoding: "utf8", windowsHide: true, timeout: 6000, maxBuffer: 4 * 1024 * 1024 },
-      (error, stdout) => {
-        if (error) {
-          resolve([]);
-          return;
-        }
-        const fonts = [];
-        for (const line of String(stdout || "").split(/\r?\n/)) {
-          const match = line.match(/^\s*(.*?)\s{4,}REG_(?:SZ|EXPAND_SZ)\s{4,}/i);
-          if (!match) continue;
-          const name = match[1]
-            .replace(/\s+\((?:TrueType|OpenType|PostScript|Type 1)\)$/i, "")
-            .trim();
-          if (name && !name.startsWith("@")) fonts.push(name);
-        }
-        resolve(fonts);
-      }
-    );
-  });
-}
-
-function getInstalledFonts() {
-  if (installedFontsPromise) return installedFontsPromise;
-  if (process.platform !== "win32") return Promise.resolve([]);
-  installedFontsPromise = Promise.all([
-    queryRegistryFonts("HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Fonts"),
-    queryRegistryFonts("HKCU\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Fonts"),
-  ]).then((groups) =>
-    [...new Set(groups.flat())].sort((left, right) => left.localeCompare(right, "ko"))
-  );
-  return installedFontsPromise;
-}
-
 function openSettingsWindow(section = "general") {
   const requestedSection = ["general", "accounts", "usage"].includes(section)
     ? section
@@ -3051,7 +3035,6 @@ function openSettingsWindow(section = "general") {
     return;
   }
 
-  const dark = getThemePayload().resolvedTheme === "dark";
   settingsWindow = new BrowserWindow({
     width: 980,
     height: 720,
@@ -3060,7 +3043,7 @@ function openSettingsWindow(section = "general") {
     show: false,
     frame: false,
     title: "CodePet 설정",
-    backgroundColor: dark ? "#09090b" : "#fafafa",
+    backgroundColor: "#fafafa",
     autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(__dirname, "settings-preload.js"),
@@ -3081,7 +3064,7 @@ function openSettingsWindow(section = "general") {
   settingsWindow.once("ready-to-show", () => {
     settingsWindow.show();
     settingsWindow.focus();
-    sendThemeToWindows();
+    sendAppearanceToWindows();
     settingsWindow.webContents.send("settings:navigate", requestedSection);
   });
   settingsWindow.on("closed", () => {

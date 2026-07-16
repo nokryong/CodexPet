@@ -13,21 +13,6 @@
   --bubble-danger: #dc2626;
 }
 
-:root[data-theme="dark"] {
-  color-scheme: dark;
-  --bubble-bg: rgba(15, 23, 42, 0.9);
-  --bubble-ink: #f8fafc;
-  --bubble-muted: #94a3b8;
-  --bubble-border: rgba(255, 255, 255, 0.15);
-  --bubble-line: rgba(255, 255, 255, 0.1);
-  --bubble-accent: #2dd4bf;
-  --bubble-accent-soft: rgba(45, 212, 191, 0.12);
-  --bubble-hover: rgba(255, 255, 255, 0.04);
-  --bubble-track: rgba(255, 255, 255, 0.12);
-  --bubble-warn: #f59e0b;
-  --bubble-danger: #f87171;
-}
-
 html,
 body {
   margin: 0;
@@ -94,7 +79,7 @@ body {
   font-weight: 700;
   letter-spacing: -0.01em;
   text-transform: uppercase;
-  color: var(--bubble-accent);
+  color: var(--bubble-ink);
 }
 
 .title .dot {
@@ -143,7 +128,7 @@ body {
 
 .activity-row-label {
   overflow: hidden;
-  color: var(--bubble-accent);
+  color: var(--bubble-ink);
   font-size: 11px;
   font-weight: 700;
   text-overflow: ellipsis;
@@ -178,7 +163,7 @@ body {
 }
 
 .gauge .pct {
-  color: var(--bubble-accent);
+  color: var(--bubble-ink);
   font-weight: 700;
 }
 
@@ -230,7 +215,7 @@ body {
   border: 1.5px solid var(--bubble-border);
   border-radius: 6px;
   background: var(--bubble-accent-soft);
-  color: var(--bubble-accent);
+  color: var(--bubble-ink);
   cursor: pointer;
   font: inherit;
   font-size: 11px;

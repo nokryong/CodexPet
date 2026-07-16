@@ -1,6 +1,6 @@
 {
   "name": "code-pet",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "private": true,
   "description": "Multi-provider desktop companion for Codex, Antigravity, and Claude.",
   "main": "src/main.js",

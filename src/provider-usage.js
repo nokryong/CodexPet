@@ -172,9 +172,7 @@ async function fetchAntigravityUsage({ credential, force = false } = {}) {
         headers,
         body: JSON.stringify({ metadata: { pluginType: "GEMINI" } }),
       }),
-      json("https://www.googleapis.com/oauth2/v2/userinfo", {
-        headers: { authorization: `Bearer ${token}` },
-      }).catch(() => ({})),
+      fetchAntigravityIdentity({ credential }).catch(() => ({})),
     ]);
     const project = assist?.cloudaicompanionProject;
     if (!project) throw new Error("AGY 프로젝트 정보를 찾지 못했습니다.");
@@ -195,8 +193,21 @@ async function fetchAntigravityUsage({ credential, force = false } = {}) {
   }, { force });
 }
 
+async function fetchAntigravityIdentity({ credential, force = false } = {}) {
+  const token = credential?.token?.access_token;
+  if (!token) throw new Error("AGY 로그인 정보가 없습니다.");
+  const key = tokenKey("agy:identity", credential?.token?.refresh_token || token);
+  return cached(key, async () => {
+    const identity = await json("https://www.googleapis.com/oauth2/v2/userinfo", {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    return { email: identity?.email || null };
+  }, { force });
+}
+
 module.exports = {
   clearUsageCache,
+  fetchAntigravityIdentity,
   fetchAntigravityUsage,
   fetchClaudeUsage,
   normalizeAgyQuota,

@@ -5,8 +5,11 @@ const {
   ProviderProfileStore,
   atomicWrite,
   safeProfile,
-  secretFingerprint,
 } = require("./provider-profile-store");
+const {
+  normalizeClaudeAccountMetadata,
+  readClaudeAccountMetadata,
+} = require("./claude-account-metadata");
 
 class ClaudeAccountSwitcher {
   constructor({ home = os.homedir(), store, restart = async () => {} } = {}) {
@@ -25,7 +28,7 @@ class ClaudeAccountSwitcher {
   }
 
   listProfiles() {
-    const liveKey = secretFingerprint(this.current());
+    const liveKey = this.store.findKeyBySecret(this.current());
     return this.store.list().map((profile) => ({
       ...profile,
       active: Boolean(liveKey && profile.key === liveKey),
@@ -37,7 +40,14 @@ class ClaudeAccountSwitcher {
     if (!live?.claudeAiOauth?.refreshToken) {
       throw new Error("Claude 로그인 정보를 찾지 못했습니다.");
     }
-    return this.store.save({ secret: live, email: meta.email, plan: meta.plan, active: true });
+    const localMeta = readClaudeAccountMetadata(this.home);
+    const credentialMeta = normalizeClaudeAccountMetadata(live.claudeAiOauth);
+    return this.store.save({
+      secret: live,
+      email: meta.email || localMeta.email,
+      plan: meta.plan || credentialMeta.plan || localMeta.plan,
+      active: true,
+    });
   }
 
   deleteProfile(key) {

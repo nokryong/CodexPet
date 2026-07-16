@@ -6,8 +6,6 @@ const bubbleElement = document.querySelector("#bubble");
 let currentBubbleData = null;
 window.bubbleApi.onAppearance((appearance) => {
   const root = document.documentElement;
-  root.dataset.theme = appearance?.resolvedTheme === "dark" ? "dark" : "light";
-
   if (appearance?.fontFamily) {
     const fontFamily = String(appearance.fontFamily)
       .replace(/\\/g, "\\\\")

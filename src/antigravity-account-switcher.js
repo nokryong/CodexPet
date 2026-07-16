@@ -29,7 +29,12 @@ class AntigravityAccountSwitcher {
     if (!secret?.token?.refresh_token) {
       throw new Error("AGY 로그인 정보를 찾지 못했습니다.");
     }
-    return this.store.save({ secret, email: meta.email, plan: meta.plan, active: true });
+    return this.store.save({
+      secret,
+      email: meta.email || this.currentAccountHint(),
+      plan: meta.plan,
+      active: true,
+    });
   }
 
   listProfiles() {
@@ -38,6 +43,30 @@ class AntigravityAccountSwitcher {
 
   deleteProfile(key) {
     return this.store.delete(key);
+  }
+
+  currentAccountHint() {
+    try {
+      const current = JSON.parse(fs.readFileSync(this.accountFile, "utf8"));
+      return typeof current?.active === "string" && current.active.trim()
+        ? current.active.trim()
+        : null;
+    } catch {
+      return null;
+    }
+  }
+
+  clearAccountHint() {
+    let current;
+    try {
+      current = JSON.parse(fs.readFileSync(this.accountFile, "utf8"));
+    } catch {
+      return;
+    }
+    const old = [...new Set([...(Array.isArray(current.old) ? current.old : []), current.active])]
+      .filter(Boolean);
+    const { active: _active, ...rest } = current;
+    atomicWrite(this.accountFile, { ...rest, old });
   }
 
   updateAccountHint(email) {
@@ -82,6 +111,7 @@ class AntigravityAccountSwitcher {
       this.store.save({ secret: current, email: meta.email, plan: meta.plan, active: true });
     }
     await this.clear();
+    this.clearAccountHint();
     this.store.clearActive();
     await this.restart();
     return true;
