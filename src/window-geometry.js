@@ -17,6 +17,29 @@ function normalizeWindowSize(width, resizeConfig) {
   };
 }
 
+// Windows에서 비리사이즈 Electron 창을 반복 이동하면 DPI 배율에 따라 네이티브 창 크기가
+// 함께 흔들릴 수 있습니다. 위치만 보내지 않고 의도한 크기를 매번 함께 적용할 수 있도록
+// BrowserWindow.setBounds에 넘길 정수 bounds를 한 곳에서 만듭니다.
+function createStableWindowBounds(x, y, width, height) {
+  if (
+    !isFiniteNumber(x) ||
+    !isFiniteNumber(y) ||
+    !isFiniteNumber(width) ||
+    !isFiniteNumber(height) ||
+    width <= 0 ||
+    height <= 0
+  ) {
+    return null;
+  }
+
+  return {
+    x: Math.round(x),
+    y: Math.round(y),
+    width: Math.round(width),
+    height: Math.round(height),
+  };
+}
+
 function getUsableWorkAreas(displays) {
   if (!Array.isArray(displays)) return [];
 
@@ -89,6 +112,7 @@ function restoreWindowGeometry(savedGeometry, displays, resizeConfig) {
 }
 
 module.exports = {
+  createStableWindowBounds,
   normalizeWindowSize,
   restoreWindowGeometry,
 };

@@ -17,7 +17,11 @@ const {
 const { deleteCredential, readCredential, writeCredential } = require("./windows-credential");
 const { formatActivityTitle } = require("./activity-title");
 const { ActivityBubbleState, applyActivityPrivacy } = require("./activity-bubble-state");
-const { normalizeWindowSize, restoreWindowGeometry } = require("./window-geometry");
+const {
+  createStableWindowBounds,
+  normalizeWindowSize,
+  restoreWindowGeometry,
+} = require("./window-geometry");
 const { normalizeThemeSource, normalizeFontFamily } = require("./appearance-settings");
 const { buildAccountSubmenu } = require("./account-submenu");
 const { rateWindowLabel } = require("./codex-usage-label");
@@ -489,7 +493,20 @@ function moveWindowTo(nextX, nextY) {
   const clamped = clampToWorkArea(nextX, nextY);
   runtime.x = clamped.x;
   runtime.y = clamped.y;
-  petWindow.setPosition(Math.round(runtime.x), Math.round(runtime.y), false);
+  const bounds = createStableWindowBounds(
+    runtime.x,
+    runtime.y,
+    runtime.width,
+    runtime.height
+  );
+  if (!bounds) {
+    console.warn("[desktop-pet] Invalid window bounds ignored.", bounds);
+    return;
+  }
+
+  // Windows의 100%가 아닌 DPI 배율에서는 resizable:false 창을 setPosition으로 반복 이동할 때
+  // 네이티브 창 크기가 누적해서 변할 수 있습니다. 위치와 의도한 크기를 함께 적용해 drift를 막습니다.
+  petWindow.setBounds(bounds, false);
 
   // 말풍선이 떠 있으면 펫을 따라다니게 합니다.
   if (bubbleWindow && !bubbleWindow.isDestroyed() && bubbleWindow.isVisible()) {
@@ -2460,6 +2477,16 @@ function createWindow() {
 
   petWindow = new BrowserWindow({
     ...WINDOW_CONFIG,
+    // Windows에서 resizable:false 창을 반복 이동할 때 발생하는 크기 drift를 피하기 위해
+    // 네이티브 속성은 true로 유지하고, 실제 사용자 리사이즈는 will-resize에서 차단합니다.
+    resizable: true,
+    minimizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    minWidth: RESIZE_CONFIG.minWidth,
+    minHeight: Math.round(RESIZE_CONFIG.minWidth * RESIZE_CONFIG.aspectRatio),
+    maxWidth: RESIZE_CONFIG.maxWidth,
+    maxHeight: Math.round(RESIZE_CONFIG.maxWidth * RESIZE_CONFIG.aspectRatio),
     width: runtime.width,
     height: runtime.height,
     x: Math.round(runtime.x),
@@ -2476,6 +2503,11 @@ function createWindow() {
   const createdPetWindow = petWindow;
 
   petWindow.setMenuBarVisibility(false);
+  // OS 테두리/스냅을 통한 수동 리사이즈만 막습니다. renderer의 커스텀 핸들이 호출하는
+  // setContentSize는 programmatic resize라 이 이벤트의 차단 대상이 아닙니다.
+  petWindow.on("will-resize", (event) => {
+    event.preventDefault();
+  });
   petWindow.loadFile(path.join(__dirname, "index.html"));
 
   if (OPEN_DEVTOOLS) {
