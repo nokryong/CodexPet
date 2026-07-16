@@ -1,7 +1,11 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
-const { normalizeWindowSize, restoreWindowGeometry } = require("../src/window-geometry");
+const {
+  createStableWindowBounds,
+  normalizeWindowSize,
+  restoreWindowGeometry,
+} = require("../src/window-geometry");
 
 const RESIZE_CONFIG = {
   minWidth: 64,
@@ -13,6 +17,17 @@ const DISPLAYS = [
   { workArea: { x: 0, y: 0, width: 1920, height: 1040 } },
   { workArea: { x: -1280, y: 0, width: 1280, height: 984 } },
 ];
+
+test("자동 보행 bounds는 위치를 반올림해도 의도한 창 크기를 그대로 유지한다", () => {
+  assert.deepEqual(createStableWindowBounds(100.4, 200.6, 102, 110), {
+    x: 100,
+    y: 201,
+    width: 102,
+    height: 110,
+  });
+  assert.equal(createStableWindowBounds(0, 0, Number.NaN, 110), null);
+  assert.equal(createStableWindowBounds(0, 0, 102, -1), null);
+});
 
 test("저장 크기는 현재 최소/최대 및 종횡비 규칙으로 정규화한다", () => {
   assert.deepEqual(normalizeWindowSize(600, RESIZE_CONFIG), { width: 512, height: 555 });
