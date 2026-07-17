@@ -482,7 +482,7 @@ const usageWarnedResets = { primary: null, secondary: null };
 
 const codexAccountSwitcher = new CodexAccountSwitcher();
 
-// Codex 재시작 없는 전환 + 한도 자동 로테이션용 로컬 프록시입니다. (기본 켜짐)
+// Codex 재시작 없는 전환 + 한도 자동 로테이션용 로컬 프록시입니다. (명시적 opt-in)
 // 선호 순서: 활성 프로필 → 나머지 저장 프로필. 저장 프로필이 하나도 없으면 live auth.json 하나로 동작.
 // 저장 프로필에서 직접 읽으므로 실행 중인 Codex 앱이 auth.json을 되덮어써도 전환이 유지됩니다.
 // listProfiles()는 디렉토리 스캔 + auth.json 해시 등 무거운 동기 fs라서, 프록시가 요청마다
@@ -549,9 +549,10 @@ const codexProxy = new CodexProxy({
   },
 });
 
-// 기본 켜짐: 사용자가 명시적으로 끈 경우(false 저장)에만 비활성화합니다.
+// config.toml을 바꾸는 실험적 네트워크 경로이므로 사용자가 명시적으로 켠 경우에만 활성화합니다.
+// 강제 종료 시 다음 CodePet 실행 전까지 죽은 로컬 포트가 남을 수 있어 기본값을 켜짐으로 두지 않습니다.
 function isCodexProxyModeEnabled() {
-  return readSettings().codexProxyMode !== false;
+  return readSettings().codexProxyMode === true;
 }
 
 // 프록시가 실제로 config.toml에 주입되어 Codex 트래픽이 프록시를 타는 상태인지입니다.
@@ -613,6 +614,7 @@ async function restoreCodexProxyMode() {
     appendDebugLog(`codex proxy restore failed: ${error.message || String(error)}`);
     codexProxyActive = false;
     codexProxy.stop();
+    writeSettings({ codexProxyMode: false });
   }
 }
 
