@@ -10,6 +10,7 @@ const { ClaudeWatcher } = require("./claude-watcher");
 const { ClaudeAccountSwitcher } = require("./claude-account-switcher");
 const { normalizeClaudeAccountMetadata } = require("./claude-account-metadata");
 const { AntigravityAccountSwitcher } = require("./antigravity-account-switcher");
+const { loadAccountUsageCards } = require("./account-usage");
 const {
   clearUsageCache,
   fetchAntigravityIdentity,
@@ -3383,53 +3384,62 @@ function codexAccountRows() {
 }
 
 async function loadCodexUsage() {
-  try {
-    const data = buildUsageBubbleData(await codexAccountSwitcher.fetchCurrentUsage());
-    return { id: "codex", label: "Codex", gauges: data.gauges };
-  } catch {
-    return { id: "codex", label: "Codex", error: "조회 불가", gauges: [] };
-  }
+  const profiles = codexAccountSwitcher.listProfiles();
+  return loadAccountUsageCards({
+    providerId: "codex",
+    providerLabel: "Codex",
+    profiles,
+    loadUsage: async (profile) => {
+      const usage = profile.active
+        ? await codexAccountSwitcher.fetchCurrentUsage()
+        : await codexAccountSwitcher.fetchProfileUsage(profile.key);
+      return buildUsageBubbleData(usage);
+    },
+  });
 }
 
 async function loadAntigravityProvider(forceUsage) {
-  let credential;
-  try {
-    credential = await antigravityAccountSwitcher.read();
-  } catch {
-    return {
-      accounts: antigravityAccountSwitcher.listProfiles(),
-      usage: { id: "agy", label: "AGY", error: "로그인 필요", gauges: [] },
-    };
-  }
-
+  let credential = null;
   let identity = {};
   try {
+    credential = await antigravityAccountSwitcher.read();
     identity = await fetchAntigravityIdentity({ credential, force: forceUsage });
   } catch {
-    // 계정 조회가 막혀도 저장된 힌트와 한도 조회는 각각 계속 시도합니다.
+    // live 로그인이 없거나 계정 조회가 막혀도 저장된 프로필은 각각 조회합니다.
   }
-  try {
-    await antigravityAccountSwitcher.snapshotCurrent({ email: identity.email });
-  } catch {
-    // 로그인 정보 자체가 없으면 아래 한도 조회에서 로그인 오류로 처리합니다.
+  if (credential) {
+    try {
+      await antigravityAccountSwitcher.snapshotCurrent({ email: identity.email });
+    } catch {
+      // 저장할 수 없는 live 자격 증명은 저장 프로필 조회를 막지 않습니다.
+    }
   }
 
-  let usage;
-  try {
-    const data = await fetchAntigravityUsage({ credential, force: forceUsage });
-    await antigravityAccountSwitcher.snapshotCurrent({
-      email: data.email || identity.email,
-      plan: data.plan,
-    });
-    usage = { id: "agy", label: "AGY", gauges: data.gauges };
-  } catch {
-    try {
-      await antigravityAccountSwitcher.snapshotCurrent();
-    } catch {
-      // 로그인 정보 자체가 없으면 저장할 프로필도 없습니다.
-    }
-    usage = { id: "agy", label: "AGY", error: "조회 불가", gauges: [] };
-  }
+  const profiles = antigravityAccountSwitcher.listProfiles();
+  const usage = await loadAccountUsageCards({
+    providerId: "agy",
+    providerLabel: "AGY",
+    profiles,
+    loadUsage: async (profile) => {
+      const credentialStore = profile.active && credential
+        ? {
+            read: () => credential,
+            write: (next) => antigravityAccountSwitcher.write(next),
+          }
+        : antigravityAccountSwitcher.createProfileCredentialStore(profile.key);
+      const data = await fetchAntigravityUsage({
+        credentialStore,
+        force: forceUsage,
+      });
+      if (profile.active && credential) {
+        await antigravityAccountSwitcher.snapshotCurrent({
+          email: data.email || identity.email,
+          plan: data.plan,
+        });
+      }
+      return data;
+    },
+  });
   return { accounts: antigravityAccountSwitcher.listProfiles(), usage };
 }
 
@@ -3446,24 +3456,29 @@ async function loadClaudeProvider(forceUsage) {
       plan: status.subscriptionType,
     });
   } catch {
-    return {
-      accounts: claudeAccountSwitcher.listProfiles(),
-      usage: { id: "claude", label: "Claude", error: "로그인 필요", gauges: [] },
-    };
+    // live 로그인이 없어도 저장된 프로필은 각각 조회합니다.
   }
 
-  let usage;
-  try {
-    const data = await fetchClaudeUsage({ force: forceUsage, credentialStore: claudeLiveStore });
-    // 토큰 갱신으로 live 파일이 바뀌었을 수 있으므로 최신 값을 다시 저장합니다.
-    claudeAccountSwitcher.snapshotCurrent({
-      email: status.email,
-      plan: status.subscriptionType,
-    });
-    usage = { id: "claude", label: "Claude", gauges: data.gauges };
-  } catch {
-    usage = { id: "claude", label: "Claude", error: "조회 불가", gauges: [] };
-  }
+  const profiles = claudeAccountSwitcher.listProfiles();
+  const usage = await loadAccountUsageCards({
+    providerId: "claude",
+    providerLabel: "Claude",
+    profiles,
+    loadUsage: async (profile) => {
+      const credentialStore = profile.active
+        ? claudeLiveStore
+        : claudeAccountSwitcher.createProfileCredentialStore(profile.key);
+      const data = await fetchClaudeUsage({ force: forceUsage, credentialStore });
+      if (profile.active) {
+        // live 토큰이 갱신됐을 수 있으므로 저장 프로필도 최신 상태로 맞춥니다.
+        claudeAccountSwitcher.snapshotCurrent({
+          email: status.email,
+          plan: status.subscriptionType,
+        });
+      }
+      return data;
+    },
+  });
   return { accounts: claudeAccountSwitcher.listProfiles(), usage };
 }
 
@@ -3493,7 +3508,7 @@ async function getSettingsData({ forceUsage = false } = {}) {
       { id: "agy", label: "AGY", accounts: agy.accounts },
       { id: "claude", label: "Claude", accounts: claude.accounts },
     ],
-    usage: [codexUsage, agy.usage, claude.usage],
+    usage: [...codexUsage, ...agy.usage, ...claude.usage],
   };
 }
 

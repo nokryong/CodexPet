@@ -3,6 +3,8 @@ const os = require("node:os");
 const { createClaudeFileStore } = require("./claude-live-credentials");
 
 const CLAUDE_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
+const ANTIGRAVITY_CLIENT_ID =
+  "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com";
 const cache = new Map();
 
 class HttpError extends Error {
@@ -116,6 +118,33 @@ async function refreshClaudeOAuth(credentials, store) {
   return next;
 }
 
+async function refreshAntigravityOAuth(credential, store) {
+  const token = credential?.token;
+  if (!token?.refresh_token) throw new Error("AGY 로그인 정보가 만료됐습니다.");
+  const refresh = await json("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      client_id: credential.client_id || token.client_id || ANTIGRAVITY_CLIENT_ID,
+      refresh_token: token.refresh_token,
+      grant_type: "refresh_token",
+    }).toString(),
+  });
+  const expiresIn = Number(refresh.expires_in) || 3600;
+  const next = {
+    ...credential,
+    token: {
+      ...token,
+      access_token: refresh.access_token || token.access_token,
+      refresh_token: refresh.refresh_token || token.refresh_token,
+      expires_in: expiresIn,
+      expiry_date: Date.now() + expiresIn * 1000,
+    },
+  };
+  await store.write(next);
+  return next;
+}
+
 // credentialStore를 넘기지 않으면 파일 저장소를 사용합니다. (macOS 실사용은 main.js가 Keychain 저장소를 주입)
 async function fetchClaudeUsage({ home = os.homedir(), force = false, credentialStore } = {}) {
   const store = credentialStore || createClaudeFileStore(home);
@@ -156,41 +185,59 @@ function tierLabel(assist) {
   return tier?.displayName || tier?.display_name || tier?.name || tier?.id || null;
 }
 
-async function fetchAntigravityUsage({ credential, force = false } = {}) {
-  const token = credential?.token?.access_token;
+async function fetchAntigravityUsage({ credential, credentialStore, force = false } = {}) {
+  const store = credentialStore || {
+    read: () => credential,
+    write: () => {},
+  };
+  let currentCredential = await store.read();
+  const token = currentCredential?.token?.access_token;
   if (!token) throw new Error("AGY 로그인 정보가 없습니다.");
-  const key = tokenKey("agy", credential?.token?.refresh_token || token);
+  const key = tokenKey("agy", currentCredential?.token?.refresh_token || token);
 
   return cached(key, async () => {
-    const headers = {
-      authorization: `Bearer ${token}`,
-      "content-type": "application/json",
-      "user-agent": "antigravity/cli/1.0.11 windows/amd64",
+    const request = async () => {
+      const accessToken = currentCredential.token.access_token;
+      const headers = {
+        authorization: `Bearer ${accessToken}`,
+        "content-type": "application/json",
+        "user-agent": "antigravity/cli/1.0.11 windows/amd64",
+      };
+      const [assist, identity] = await Promise.all([
+        json("https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist", {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ metadata: { pluginType: "GEMINI" } }),
+        }),
+        fetchAntigravityIdentity({ credential: currentCredential }).catch(() => ({})),
+      ]);
+      const project = assist?.cloudaicompanionProject;
+      if (!project) throw new Error("AGY 프로젝트 정보를 찾지 못했습니다.");
+      const quota = await json(
+        "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary",
+        {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ project }),
+        }
+      );
+      return {
+        provider: "agy",
+        email: identity.email || null,
+        plan: tierLabel(assist),
+        gauges: normalizeAgyQuota(quota),
+      };
     };
-    const [assist, identity] = await Promise.all([
-      json("https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist", {
-        method: "POST",
-        headers,
-        body: JSON.stringify({ metadata: { pluginType: "GEMINI" } }),
-      }),
-      fetchAntigravityIdentity({ credential }).catch(() => ({})),
-    ]);
-    const project = assist?.cloudaicompanionProject;
-    if (!project) throw new Error("AGY 프로젝트 정보를 찾지 못했습니다.");
-    const quota = await json(
-      "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary",
-      {
-        method: "POST",
-        headers,
-        body: JSON.stringify({ project }),
+
+    try {
+      return await request();
+    } catch (error) {
+      if (![401, 403].includes(error.status) || !currentCredential?.token?.refresh_token) {
+        throw error;
       }
-    );
-    return {
-      provider: "agy",
-      email: identity.email || null,
-      plan: tierLabel(assist),
-      gauges: normalizeAgyQuota(quota),
-    };
+      currentCredential = await refreshAntigravityOAuth(currentCredential, store);
+      return request();
+    }
   }, { force });
 }
 

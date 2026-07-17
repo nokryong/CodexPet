@@ -312,10 +312,17 @@ function renderUsage() {
   for (const item of state?.usage || []) {
     const card = createElement("article", "usage-card");
     const heading = createElement("header", "usage-card-heading");
-    heading.append(
-      createElement("span", "provider-mark", item.label.slice(0, 1)),
-      createElement("h2", "", item.label)
+    const providerLabel = item.providerLabel || item.label || "계정";
+    const title = createElement("div", "usage-account-title");
+    title.append(
+      createElement("h2", "", providerLabel),
+      createElement("p", "", item.accountLabel || "연결된 계정")
     );
+    heading.append(
+      createElement("span", "provider-mark", providerLabel.slice(0, 1)),
+      title
+    );
+    if (item.active) heading.appendChild(createElement("span", "usage-current", "현재"));
     card.appendChild(heading);
 
     if (item.error) {

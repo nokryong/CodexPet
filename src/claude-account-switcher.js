@@ -32,6 +32,30 @@ class ClaudeAccountSwitcher {
     }));
   }
 
+  createProfileCredentialStore(key) {
+    let profileKey = key;
+    return {
+      read: () => {
+        const profile = this.store.get(profileKey);
+        if (!ClaudeAccountSwitcher.hasClaudeToken(profile?.secret)) {
+          throw new Error("저장된 Claude 계정을 찾지 못했습니다.");
+        }
+        return profile.secret;
+      },
+      write: (secret) => {
+        const profile = this.store.get(profileKey);
+        if (!profile) throw new Error("저장된 Claude 계정을 찾지 못했습니다.");
+        const updated = this.store.save({
+          secret,
+          email: profile.email,
+          plan: profile.plan,
+          active: this.store.getActiveKey() === profileKey,
+        });
+        profileKey = updated.key;
+      },
+    };
+  }
+
   // macOS 데스크톱 앱이 관리하는 인증은 refreshToken 없이 accessToken만 있을 수 있어 둘 다 허용합니다.
   static hasClaudeToken(secret) {
     const oauth = secret?.claudeAiOauth;

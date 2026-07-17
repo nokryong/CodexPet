@@ -160,6 +160,25 @@ test("AGY는 로컬 계정 힌트를 사용량 조회와 무관하게 이메일�
   assert.equal(profile.label, "agy@example.com");
 });
 
+test("AGY 저장 계정 토큰 갱신을 해당 프로필에만 보존한다", (t) => {
+  const home = tempHome(t);
+  const live = agySecret("live");
+  const switcher = new AntigravityAccountSwitcher({ home, read: async () => live });
+  const stored = switcher.store.save({
+    secret: agySecret("stored"),
+    email: "stored@example.com",
+  });
+
+  const credentialStore = switcher.createProfileCredentialStore(stored.key);
+  const credential = credentialStore.read();
+  credential.token.access_token = "access-fresh";
+  credentialStore.write(credential);
+
+  assert.equal(switcher.store.get(stored.key).secret.token.access_token, "access-fresh");
+  assert.deepEqual(live, agySecret("live"));
+  assert.equal(Object.hasOwn(switcher.listProfiles()[0], "secret"), false);
+});
+
 test("Claude 전환은 live 자격 파일을 원자 교체하고 새 계정을 활성 표시한다", async (t) => {
   const home = tempHome(t);
   const livePath = path.join(home, ".claude", ".credentials.json");
@@ -178,6 +197,33 @@ test("Claude 전환은 live 자격 파일을 원자 교체하고 새 계정을 �
   assert.equal(result.active, true);
   assert.equal(Object.hasOwn(result, "secret"), false);
   assert.equal(switcher.listProfiles().find((profile) => profile.key === beta.key).active, true);
+});
+
+test("Claude 저장 계정의 OAuth 갱신을 해당 프로필에만 보존한다", (t) => {
+  const home = tempHome(t);
+  const livePath = path.join(home, ".claude", ".credentials.json");
+  atomicWrite(livePath, claudeSecret("live"));
+  const switcher = new ClaudeAccountSwitcher({ home });
+  const stored = switcher.store.save({
+    secret: claudeSecret("stored", { refreshTokenExpiresAt: 1_790_000_000_000 }),
+    email: "stored@example.com",
+    plan: "max",
+  });
+  const credentialStore = switcher.createProfileCredentialStore(stored.key);
+
+  const credentials = credentialStore.read();
+  credentials.claudeAiOauth.refreshToken = "rotated";
+  credentials.claudeAiOauth.accessToken = "access-rotated";
+  credentialStore.write(credentials);
+
+  const refreshed = switcher.store.get(stored.key);
+  assert.equal(refreshed.secret.claudeAiOauth.refreshToken, "rotated");
+  assert.equal(refreshed.email, "stored@example.com");
+  assert.equal(refreshed.plan, "max");
+  assert.equal(
+    JSON.parse(fs.readFileSync(livePath, "utf8")).claudeAiOauth.refreshToken,
+    "live"
+  );
 });
 
 test("비활성 저장 프로필만 삭제하고 활성 프로필 삭제는 거부한다", (t) => {

@@ -3,6 +3,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
+const { refreshAuthFileIfStale } = require("./codex-proxy");
 
 // CodePet 계정 전환 방식:
 //  1. 실제 Codex Desktop은 항상 기본 ~/.codex/auth.json을 사용합니다.
@@ -746,25 +747,23 @@ class CodexAccountSwitcher {
     return windows;
   }
 
-  // 더블클릭 사용량 조회는 live ~/.codex/auth.json 기준으로 매번 직접 조회합니다.
-  async fetchCurrentUsage() {
+  async fetchUsageForSummary(account) {
     if (typeof fetch !== "function") {
       throw new Error("이 Electron 런타임에서 fetch를 사용할 수 없습니다.");
     }
 
-    const current = this.readCurrentAuthSummary();
-    if (!current.hasAuth || !current.accessToken) {
-      throw new Error("현재 Codex 로그인 정보가 없습니다.");
+    if (!account?.hasAuth || !account.accessToken) {
+      throw new Error("Codex 로그인 정보가 없습니다.");
     }
 
     const headers = {
-      Authorization: `Bearer ${current.accessToken}`,
+      Authorization: `Bearer ${account.accessToken}`,
       "User-Agent": USER_AGENT,
       Accept: "application/json",
     };
 
-    if (current.accountId) {
-      headers["ChatGPT-Account-Id"] = current.accountId;
+    if (account.accountId) {
+      headers["ChatGPT-Account-Id"] = account.accountId;
     }
 
     const controller = new AbortController();
@@ -788,15 +787,15 @@ class CodexAccountSwitcher {
     const windows = this.normalizeUsageWindows(payload);
     const primary = windows.find((window) => window.source === "main" && window.window_key === "primary") || null;
     const secondary = windows.find((window) => window.source === "main" && window.window_key === "secondary") || null;
-    const planType = payload.plan_type || payload.planType || current.planType || null;
-    const email = payload.email || current.email || current.displayId || null;
+    const planType = payload.plan_type || payload.planType || account.planType || null;
+    const email = payload.email || account.email || account.displayId || null;
 
     return {
       profile: {
-        ...current,
+        ...account,
         displayId: email,
         planType,
-        label: this.formatProfileLabel(email || current.displayId, planType),
+        label: this.formatProfileLabel(email || account.displayId, planType),
       },
       source: "backend-api",
       recordedAt: new Date().toISOString(),
@@ -807,6 +806,26 @@ class CodexAccountSwitcher {
         windows,
       },
     };
+  }
+
+  // 더블클릭 사용량 조회는 live ~/.codex/auth.json 기준으로 매번 직접 조회합니다.
+  async fetchCurrentUsage() {
+    await refreshAuthFileIfStale(this.targetAuthPath);
+    const current = this.readCurrentAuthSummary();
+    if (!current.hasAuth || !current.accessToken) {
+      throw new Error("현재 Codex 로그인 정보가 없습니다.");
+    }
+    return this.fetchUsageForSummary(current);
+  }
+
+  // 설정 창은 live auth를 바꾸지 않고 저장된 계정 사본으로 각각 조회합니다.
+  async fetchProfileUsage(profileKey) {
+    const profile = this.getProfile(profileKey);
+    if (!profile) throw new Error("저장된 Codex 계정을 찾지 못했습니다.");
+    const authPath = this.profileAuthPath(profile.key);
+    await refreshAuthFileIfStale(authPath);
+    const summary = this.readAuthSummaryFromFile(authPath);
+    return this.fetchUsageForSummary(summary);
   }
 }
 

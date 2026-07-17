@@ -76,6 +76,45 @@ test("AGY 응답에서 계정, 플랜, 한도만 정규화한다", async (t) => 
   assert.equal(tierLabel({ currentTier: { name: "free-tier" } }), "free-tier");
 });
 
+test("AGY 저장 계정 access token이 만료되면 갱신하고 사용량 조회를 재시도한다", async (t) => {
+  const originalFetch = global.fetch;
+  let stored = { token: { access_token: "expired", refresh_token: "refresh" } };
+  t.after(() => {
+    global.fetch = originalFetch;
+    clearUsageCache();
+  });
+  global.fetch = async (url, options = {}) => {
+    const target = String(url);
+    if (target.includes("oauth2.googleapis.com/token")) {
+      assert.match(String(options.body), /grant_type=refresh_token/);
+      return jsonResponse({ access_token: "fresh", expires_in: 3600 });
+    }
+    if (target.includes("loadCodeAssist") && options.headers.authorization === "Bearer expired") {
+      return jsonResponse({}, 401);
+    }
+    if (target.includes("loadCodeAssist")) {
+      return jsonResponse({ cloudaicompanionProject: "projects/test" });
+    }
+    if (target.includes("userinfo")) return jsonResponse({ email: "agy@example.com" });
+    return jsonResponse({
+      groups: [{ displayName: "모델", buckets: [{ displayName: "5시간", remainingFraction: 0.5 }] }],
+    });
+  };
+
+  const result = await fetchAntigravityUsage({
+    credentialStore: {
+      read: () => stored,
+      write: (next) => {
+        stored = next;
+      },
+    },
+    force: true,
+  });
+
+  assert.equal(stored.token.access_token, "fresh");
+  assert.equal(result.gauges[0].usedPercent, 50);
+});
+
 test("Claude 사용량 cache는 계정 자격 증명별로 분리한다", async (t) => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "codepet-usage-"));
   const credentialPath = path.join(home, ".claude", ".credentials.json");

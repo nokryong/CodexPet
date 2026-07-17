@@ -1008,7 +1008,7 @@ input[type="search"]::placeholder {
 
 .usage-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
   gap: 10px;
   margin-top: 12px;
 }
@@ -1024,6 +1024,30 @@ input[type="search"]::placeholder {
 .usage-card-heading {
   padding-bottom: 11px;
   border-bottom: 1px solid var(--line);
+}
+
+.usage-account-title {
+  min-width: 0;
+  flex: 1;
+}
+
+.usage-account-title p {
+  overflow: hidden;
+  margin: 2px 0 0;
+  color: var(--muted);
+  font-size: 10.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.usage-current {
+  flex: none;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 700;
 }
 
 .usage-gauge {

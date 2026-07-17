@@ -41,6 +41,30 @@ class AntigravityAccountSwitcher {
     return this.store.list();
   }
 
+  createProfileCredentialStore(key) {
+    let profileKey = key;
+    return {
+      read: () => {
+        const profile = this.store.get(profileKey);
+        if (!profile?.secret?.token?.refresh_token) {
+          throw new Error("저장된 AGY 계정을 찾지 못했습니다.");
+        }
+        return profile.secret;
+      },
+      write: (secret) => {
+        const profile = this.store.get(profileKey);
+        if (!profile) throw new Error("저장된 AGY 계정을 찾지 못했습니다.");
+        const updated = this.store.save({
+          secret,
+          email: profile.email,
+          plan: profile.plan,
+          active: this.store.getActiveKey() === profileKey,
+        });
+        profileKey = updated.key;
+      },
+    };
+  }
+
   deleteProfile(key) {
     return this.store.delete(key);
   }
