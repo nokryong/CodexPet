@@ -1,11 +1,16 @@
 // 원래 스프라이트 한 칸 크기 비율 기준 (192:208)
 const BASE_WIDTH = 192;
 const BASE_HEIGHT = 208;
-const SPRITE_COLS = 8;
-const SPRITE_ROWS = 9;
+const {
+  DEFAULT_SPRITE_ROWS,
+  SPRITE_COLS,
+  detectSpriteRows,
+  stateFrameCount,
+} = globalThis.CodePetSpriteLayout;
 
 let currentWidth = BASE_WIDTH;
 let currentHeight = BASE_HEIGHT;
+let spriteRows = DEFAULT_SPRITE_ROWS;
 
 // 상태별 row/frames/fps를 한 곳에서 관리합니다.
 // row는 스프라이트시트의 세로 줄, column은 해당 row 안의 가로 프레임입니다.
@@ -21,6 +26,17 @@ const PET_STATES = Object.freeze({
   running: { row: 7, frames: 8, fps: 4, loop: true },
   review: { row: 8, frames: 8, fps: 3, loop: true },
 });
+
+function getPetState(stateName = currentStateName) {
+  const normalizedState = Object.prototype.hasOwnProperty.call(PET_STATES, stateName)
+    ? stateName
+    : "idle";
+  const state = PET_STATES[normalizedState];
+  return {
+    ...state,
+    frames: stateFrameCount(normalizedState, spriteRows, state.frames),
+  };
+}
 
 // 클릭과 드래그를 구분하기 위한 기준값입니다.
 // 이 거리보다 많이 움직이면 클릭 반응을 실행하지 않고 드래그로만 처리합니다.
@@ -107,7 +123,7 @@ function normalizeStateName(stateName) {
 // 현재 프레임 번호에 맞춰 background-position을 옮깁니다.
 // column은 x축, row는 y축이므로 둘 다 음수 픽셀로 이동해야 원하는 셀이 보입니다.
 function applySpriteFrame() {
-  const state = PET_STATES[currentStateName] || PET_STATES.idle;
+  const state = getPetState();
   const safeWidth = currentWidth > 0 ? currentWidth : BASE_WIDTH;
   const safeHeight = currentHeight > 0 ? currentHeight : BASE_HEIGHT;
   const column = currentFrame % state.frames;
@@ -118,7 +134,7 @@ function applySpriteFrame() {
   if (!spriteImage) return;
 
   const sourceWidth = spriteImage.naturalWidth / SPRITE_COLS;
-  const sourceHeight = spriteImage.naturalHeight / SPRITE_ROWS;
+  const sourceHeight = spriteImage.naturalHeight / spriteRows;
   petContext.drawImage(
     spriteImage,
     column * sourceWidth,
@@ -135,7 +151,7 @@ function applySpriteFrame() {
 // 다음 프레임으로 넘어갑니다.
 // loop:false 상태는 마지막 프레임까지 재생한 뒤 returnTo 규칙에 따라 이전 상태나 idle로 돌아갑니다.
 function advanceFrame() {
-  const state = PET_STATES[currentStateName] || PET_STATES.idle;
+  const state = getPetState();
 
   applySpriteFrame();
   currentFrame += 1;
@@ -155,7 +171,7 @@ function advanceFrame() {
 // fps에 맞춰 setInterval을 다시 설정합니다.
 // fps를 빠르게 하면 같은 row의 column들이 더 빠르게 넘어가고, 느리게 하면 더 천천히 재생됩니다.
 function restartAnimationTimer() {
-  const state = PET_STATES[currentStateName] || PET_STATES.idle;
+  const state = getPetState();
   const frameMs = Math.round(1000 / state.fps);
 
   clearInterval(animationTimer);
@@ -167,9 +183,9 @@ function restartAnimationTimer() {
 // 단발 상태가 끝나면 돌아갈 수 있도록 loop 상태를 previousLoopStateName에 기억합니다.
 function setAnimationState(nextStateName) {
   const normalizedState = normalizeStateName(nextStateName);
-  const nextState = PET_STATES[normalizedState];
+  const nextState = getPetState(normalizedState);
 
-  if (PET_STATES[currentStateName]?.loop && currentStateName !== normalizedState) {
+  if (getPetState(currentStateName).loop && currentStateName !== normalizedState) {
     previousLoopStateName = currentStateName;
   }
 
@@ -209,7 +225,13 @@ function applySpriteSheet(config, keepState = false) {
   const image = new Image();
 
   image.onload = () => {
+    spriteRows = detectSpriteRows({
+      width: image.naturalWidth,
+      height: image.naturalHeight,
+      spriteVersionNumber: config.spriteVersionNumber,
+    });
     spriteImage = image;
+    petElement.dataset.spriteRows = String(spriteRows);
     petElement.hidden = false;
     errorElement.hidden = true;
     setAnimationState(keepState ? currentStateName : "idle");

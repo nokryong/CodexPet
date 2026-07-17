@@ -7,7 +7,6 @@
   --bubble-line: rgba(15, 23, 42, 0.08);
   --bubble-accent: #0f766e;
   --bubble-accent-soft: rgba(15, 118, 110, 0.08);
-  --bubble-hover: rgba(15, 23, 42, 0.03);
   --bubble-track: rgba(15, 23, 42, 0.08);
   --bubble-warn: #ca8a04;
   --bubble-danger: #dc2626;
@@ -53,11 +52,6 @@ body {
 
 .bubble.clickable {
   border-color: var(--bubble-accent);
-}
-
-.bubble.clickable:hover,
-.activity-section.clickable:hover {
-  background: var(--bubble-hover);
 }
 
 .tail {

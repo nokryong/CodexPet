@@ -17,7 +17,7 @@ exe로 뽑으려면:
 npm run dist
 ```
 
-`artifacts/CodePet-0.3.1.exe` 포터블 실행 파일이 나옵니다. 설치 과정 없이 실행할 수 있습니다. 빌드는 앱을 끈 상태에서 돌려야 합니다(실행 중이면 파일 잠금 때문에 실패).
+`artifacts/CodePet-0.3.2.exe` 포터블 실행 파일이 나옵니다. 설치 과정 없이 실행할 수 있습니다. 빌드는 앱을 끈 상태에서 돌려야 합니다(실행 중이면 파일 잠금 때문에 실패).
 
 DevTools가 필요하면 이렇게 켜세요.
 
@@ -97,22 +97,29 @@ Codex의 `~/.codex/sessions`, AGY의 로컬 transcript, Claude의 프로젝트 J
 
 ## 커스텀 스프라이트 만들기
 
-Codex 펫 스프라이트 규격을 그대로 따릅니다.
+Codex 펫 스프라이트 규격을 그대로 따르며 v1과 v2를 모두 자동 인식합니다.
 
-- 전체 크기 1536x1872, 셀 192x208의 8열 x 9행 그리드
+- v1: 전체 크기 1536x1872, 셀 192x208의 8열 x 9행 그리드
+- v2: 전체 크기 1536x2288, 셀 192x208의 8열 x 11행 그리드
 - row가 상태, column이 프레임
 
-| row | 상태 | 프레임 수 |
-|---|---|---|
-| 0 | idle | 6 |
-| 1 | runningRight | 8 |
-| 2 | runningLeft | 8 |
-| 3 | waving | 4 |
-| 4 | jumping | 5 |
-| 5 | failed | 8 |
-| 6 | waiting | 8 |
-| 7 | running | 8 |
-| 8 | review | 8 |
+| row | 상태 | v1 프레임 수 | v2 프레임 수 |
+|---:|---|---:|---:|
+| 0 | idle | 6 | 6 |
+| 1 | runningRight | 8 | 8 |
+| 2 | runningLeft | 8 | 8 |
+| 3 | waving | 4 | 4 |
+| 4 | jumping | 5 | 5 |
+| 5 | failed | 8 | 8 |
+| 6 | waiting | 8 | 6 |
+| 7 | running | 8 | 6 |
+| 8 | review | 8 | 6 |
+| 9 | look directions A | - | 8 |
+| 10 | look directions B | - | 8 |
+
+v2의 row 9~10에는 시계 방향의 시선 방향 16개가 들어갑니다. 현재 CodePet은 row 0~8의 기본 애니메이션을 재생하고 row 9~10은 시트를 올바르게 자르기 위한 v2 레이아웃으로 인식합니다.
+
+이미지 크기가 정상 규격이면 높이로 9행/11행을 자동 판별합니다. 이미지 비율을 판별할 수 없을 때는 같은 폴더의 `pet.json`에 있는 `spriteVersionNumber`를 fallback으로 사용합니다.
 
 이 규격으로 만든 `spritesheet.webp`를 exe 옆 `pet/` 폴더에 넣으면 메뉴에 "커스텀"으로 나타납니다.
 

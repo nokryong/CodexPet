@@ -150,7 +150,7 @@ const SPRITE_ASSET = Object.freeze({
 });
 
 // Codex CLI가 설치한 펫 에셋 폴더입니다. 폴더마다 pet.json + spritesheet.webp가 들어 있고,
-// 스프라이트는 전부 같은 규격(1536x1872, 8x9 grid)이라 이미지만 바꿔도 렌더링이 됩니다.
+// renderer가 실제 이미지 비율로 v1(8x9)과 v2(8x11)를 자동 판별합니다.
 const CODEX_PETS_DIR = path.join(os.homedir(), ".codex", "pets");
 
 // 개발 모드에서는 프로젝트 루트, 패키징된 exe에서는 exe가 있는 폴더입니다.
@@ -277,9 +277,22 @@ function buildActivityBubbleModeSubmenu() {
 function listAvailablePets() {
   const pets = [];
 
-  const customPath = path.join(getBaseDir(), "pet", "spritesheet.webp");
+  const customDir = path.join(getBaseDir(), "pet");
+  const customPath = path.join(customDir, "spritesheet.webp");
   if (fs.existsSync(customPath)) {
-    pets.push({ key: "custom", label: "커스텀 (pet 폴더)", spritePath: customPath });
+    let spriteVersionNumber = null;
+    try {
+      const meta = JSON.parse(fs.readFileSync(path.join(customDir, "pet.json"), "utf8"));
+      spriteVersionNumber = Number(meta.spriteVersionNumber) || null;
+    } catch {
+      // pet.json이 없어도 이미지 크기로 규격을 판별합니다.
+    }
+    pets.push({
+      key: "custom",
+      label: "커스텀 (pet 폴더)",
+      spritePath: customPath,
+      spriteVersionNumber,
+    });
   }
 
   let codexPetNames = [];
@@ -294,16 +307,18 @@ function listAvailablePets() {
     if (!fs.existsSync(spritePath)) continue;
 
     let label = name;
+    let spriteVersionNumber = null;
     try {
       const meta = JSON.parse(
         fs.readFileSync(path.join(CODEX_PETS_DIR, name, "pet.json"), "utf8")
       );
       if (meta.displayName) label = meta.displayName;
+      spriteVersionNumber = Number(meta.spriteVersionNumber) || null;
     } catch {
       // pet.json이 없거나 형식이 달라도 폴더명으로 표시하면 됩니다.
     }
 
-    pets.push({ key: `codex:${name}`, label, spritePath });
+    pets.push({ key: `codex:${name}`, label, spritePath, spriteVersionNumber });
   }
 
   if (fs.existsSync(SPRITE_ASSET.filePath)) {
@@ -342,6 +357,7 @@ function createSpritePayload(pet) {
     return {
       spriteUrl,
       spritePath: pet.spritePath,
+      spriteVersionNumber: pet.spriteVersionNumber || null,
       assetExists: true,
     };
   } catch (error) {
@@ -1860,6 +1876,10 @@ function showWatcherActivityBubble(data, { active = false } = {}) {
   };
   currentActivityBubbleData = activityData;
 
+  // 더블클릭 사용량이나 계정 결과처럼 사용자가 직접 연 말풍선은 자동 작업 이벤트보다 우선합니다.
+  // 최신 작업 상태는 위에서 저장해 두고, 수동 말풍선의 타이머가 끝난 뒤 복원합니다.
+  if (pendingBubbleData && !pendingBubbleData.activityPrivacy) return false;
+
   const visibleData = createVisibleActivityBubble(activityData);
   if (visibleData) {
     showBubble(visibleData);
@@ -2664,7 +2684,7 @@ function registerIpcHandlers() {
     persistWindowGeometry();
   });
   ipcMain.on(IPC_CHANNELS.SHOW_CODEX_STATUS, () => {
-    openSettingsWindow("usage");
+    void showUsageBubble();
   });
 
   // 말풍선 renderer가 내용 높이를 보고하면 창 크기와 위치를 맞춘 뒤 표시합니다.
