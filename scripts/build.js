@@ -22,11 +22,18 @@ function cleanPrivateBuildMetadata() {
   }
 }
 
+// 기본은 현재 OS용 빌드입니다. `npm run dist -- --win` / `--mac`으로 명시할 수 있습니다.
+function resolveTargetPlatform() {
+  if (process.argv.includes("--win")) return Platform.WINDOWS;
+  if (process.argv.includes("--mac")) return Platform.MAC;
+  return process.platform === "darwin" ? Platform.MAC : Platform.WINDOWS;
+}
+
 async function main() {
   try {
     await build({
       projectDir,
-      targets: Platform.WINDOWS.createTarget(),
+      targets: resolveTargetPlatform().createTarget(),
     });
   } finally {
     cleanPrivateBuildMetadata();

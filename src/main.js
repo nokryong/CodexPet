@@ -16,7 +16,13 @@ const {
   fetchClaudeUsage,
   fetchAntigravityUsage,
 } = require("./provider-usage");
-const { deleteCredential, readCredential, writeCredential } = require("./windows-credential");
+const { deleteCredential, readCredential, writeCredential } = require("./credential-store");
+const { createClaudeLiveStore } = require("./claude-live-credentials");
+const {
+  CodexProxy,
+  disableProxyInConfig,
+  enableProxyInConfig,
+} = require("./codex-proxy");
 const { formatActivityTitle } = require("./activity-title");
 const { ActivityBubbleState, applyActivityPrivacy } = require("./activity-bubble-state");
 const {
@@ -182,15 +188,20 @@ function getBaseDir() {
 // 트레이 아이콘은 개발 중에는 build/icon.ico를, 패키징된 exe에서는 extraResources로 복사된 icon.ico를 우선 사용합니다.
 // 아이콘 파일을 못 찾더라도 트레이 기능 자체가 죽지 않게 투명한 1px PNG를 fallback으로 만듭니다.
 function createTrayIcon() {
-  const iconCandidates = [
-    path.join(process.resourcesPath || "", "icon.ico"),
-    path.join(__dirname, "..", "build", "icon.ico"),
-    path.join(getBaseDir(), "icon.ico"),
-  ];
+  // macOS 메뉴바는 .ico를 읽지 못하므로 png를 우선 사용하고, 메뉴바 크기에 맞게 줄입니다.
+  const iconNames = process.platform === "darwin" ? ["icon.png", "icon.ico"] : ["icon.ico", "icon.png"];
+  const iconCandidates = iconNames.flatMap((name) => [
+    path.join(process.resourcesPath || "", name),
+    path.join(__dirname, "..", "build", name),
+    path.join(getBaseDir(), name),
+  ]);
 
   const iconPath = iconCandidates.find((candidate) => candidate && fs.existsSync(candidate));
   if (iconPath) {
-    return nativeImage.createFromPath(iconPath);
+    const image = nativeImage.createFromPath(iconPath);
+    if (!image.isEmpty()) {
+      return process.platform === "darwin" ? image.resize({ width: 18, height: 18 }) : image;
+    }
   }
 
   console.warn("[desktop-pet] Tray icon not found. Using transparent fallback icon.");
@@ -470,12 +481,159 @@ const USAGE_WARN_THRESHOLD_PERCENT = 90;
 const usageWarnedResets = { primary: null, secondary: null };
 
 const codexAccountSwitcher = new CodexAccountSwitcher();
+
+// Codex 재시작 없는 전환 + 한도 자동 로테이션용 로컬 프록시입니다. (기본 켜짐)
+// 선호 순서: 활성 프로필 → 나머지 저장 프로필. 저장 프로필이 하나도 없으면 live auth.json 하나로 동작.
+// 저장 프로필에서 직접 읽으므로 실행 중인 Codex 앱이 auth.json을 되덮어써도 전환이 유지됩니다.
+// listProfiles()는 디렉토리 스캔 + auth.json 해시 등 무거운 동기 fs라서, 프록시가 요청마다
+// 호출하면 메인 프로세스가 매번 블로킹됩니다. 프로필은 명시적 전환/로그인 때만 바뀌므로
+// 짧은 TTL로 캐시하고, 전환 지점에서 명시적으로 무효화합니다.
+const PROXY_ACCOUNTS_TTL_MS = 1500;
+let cachedProxyAccounts = null;
+let cachedProxyAccountsAt = 0;
+
+function invalidateProxyAccountsCache() {
+  cachedProxyAccounts = null;
+}
+
+function listCodexProxyAccounts() {
+  const now = Date.now();
+  if (cachedProxyAccounts && now - cachedProxyAccountsAt < PROXY_ACCOUNTS_TTL_MS) {
+    return cachedProxyAccounts;
+  }
+
+  const profiles = codexAccountSwitcher.listProfiles().filter((profile) => profile.hasAuth);
+  const activeKey = codexAccountSwitcher.readActiveProfileKey();
+  const accounts = profiles.map((profile) => ({
+    key: profile.key,
+    label: profile.label,
+    authPath: path.join(profile.homePath, "auth.json"),
+  }));
+  accounts.sort((left, right) =>
+    (right.key === activeKey ? 1 : 0) - (left.key === activeKey ? 1 : 0)
+  );
+  if (accounts.length === 0 && fs.existsSync(codexAccountSwitcher.targetAuthPath)) {
+    accounts.push({ key: "live", label: "현재 계정", authPath: codexAccountSwitcher.targetAuthPath });
+  }
+
+  cachedProxyAccounts = accounts;
+  cachedProxyAccountsAt = now;
+  return accounts;
+}
+
+const codexProxy = new CodexProxy({
+  log: appendDebugLog,
+  resolveAccounts: async () => listCodexProxyAccounts(),
+  readAuth: (authPath) => {
+    const summary = codexAccountSwitcher.readAuthSummaryFromFile(authPath);
+    return summary.hasAuth ? { accessToken: summary.accessToken, accountId: summary.accountId } : null;
+  },
+  notifySwitch: (account, reason) => {
+    // 프록시는 이미 이 계정으로 응답을 스트리밍하는 중입니다. 활성 프로필 영속화(디스크 백업 복사 등
+    // 무거운 동기 작업)와 UI 갱신은 응답 중계를 지연시키지 않도록 다음 tick으로 미룹니다.
+    setImmediate(() => {
+      try {
+        if (account.key !== "live") {
+          codexAccountSwitcher.switchToProfile(account.key);
+          invalidateProxyAccountsCache();
+          refreshTrayMenu();
+        }
+      } catch (error) {
+        appendDebugLog(`auto-switch persist failed: ${error.message || String(error)}`);
+      }
+      appendDebugLog(`codex auto-switch to ${account.key} (${reason})`);
+      showCodexAccountBubble(
+        `Codex 한도가 소진돼 "${account.label}" 계정으로 자동 전환했습니다.\n재시작 없이 바로 적용됐어요.`
+      );
+    });
+  },
+});
+
+// 기본 켜짐: 사용자가 명시적으로 끈 경우(false 저장)에만 비활성화합니다.
+function isCodexProxyModeEnabled() {
+  return readSettings().codexProxyMode !== false;
+}
+
+// 프록시가 실제로 config.toml에 주입되어 Codex 트래픽이 프록시를 타는 상태인지입니다.
+// start()만 성공하고 주입이 실패하면 running은 true여도 이 값은 false입니다.
+let codexProxyActive = false;
+
+async function setCodexProxyMode(enabled) {
+  try {
+    if (enabled) {
+      const port = await codexProxy.start();
+      enableProxyInConfig(port);
+      codexProxyActive = true;
+      writeSettings({ codexProxyMode: true });
+      showCodexAccountBubble(
+        "재시작 없는 전환(프록시)을 켰습니다.\n실행 중인 Codex CLI/앱은 한 번만 다시 시작하면 이후 전환부터는 재시작이 필요 없습니다."
+      );
+    } else {
+      disableProxyInConfig();
+      codexProxy.stop();
+      codexProxyActive = false;
+      writeSettings({ codexProxyMode: false });
+      showCodexAccountBubble("재시작 없는 전환(프록시)을 껐습니다.\nCodex는 원래 방식으로 되돌아갑니다.");
+    }
+  } catch (error) {
+    appendDebugLog(`codex proxy toggle failed: ${error.message || String(error)}`);
+    showCodexAccountBubble(`프록시 모드 전환에 실패했습니다.\n${error.message || String(error)}`);
+    if (enabled) {
+      // 주입이 실패했으면 Codex가 반쯤 걸린 상태가 되지 않도록 config를 원복하고 완전히 끕니다.
+      codexProxyActive = false;
+      try {
+        disableProxyInConfig();
+      } catch {
+        // 원복 실패는 무시합니다.
+      }
+      codexProxy.stop();
+      writeSettings({ codexProxyMode: false });
+    }
+  }
+  refreshTrayMenu();
+}
+
+// 앱 시작 시 프록시를 복원합니다.
+async function restoreCodexProxyMode() {
+  // crash/강제 종료로 이전 실행이 남긴 죽은 프록시 마커를 항상 먼저 정리합니다. (fail-closed)
+  // 이렇게 하지 않으면 config.toml이 죽은 포트를 가리켜 Codex 전체가 막힙니다.
+  try {
+    disableProxyInConfig();
+  } catch (error) {
+    appendDebugLog(`codex proxy stale cleanup failed: ${error.message || String(error)}`);
+  }
+  if (!isCodexProxyModeEnabled()) return;
+  try {
+    const port = await codexProxy.start();
+    enableProxyInConfig(port);
+    codexProxyActive = true;
+  } catch (error) {
+    // 주입 실패(예: 사용자가 직접 openai_base_url을 설정)면 프록시를 완전히 끕니다.
+    // 그래야 switchCodexAccount가 프록시 경로로 잘못 빠져 조용히 아무것도 안 하는 상황을 막습니다.
+    appendDebugLog(`codex proxy restore failed: ${error.message || String(error)}`);
+    codexProxyActive = false;
+    codexProxy.stop();
+  }
+}
+
+// 종료 시 모드와 무관하게 주입된 마커를 항상 제거합니다. (다음 실행 때 필요하면 재주입)
+function teardownCodexProxyOnQuit() {
+  try {
+    disableProxyInConfig();
+  } catch {
+    // 종료 경로에서는 실패해도 앱 종료를 막지 않습니다.
+  }
+  codexProxy.stop();
+  codexProxyActive = false;
+}
 codexAccountSwitcher.cleanupLegacyCodePetState();
 codexAccountSwitcher.ensureCurrentAccountProfile();
 const codexWatcher = new CodexWatcher();
 const antigravityWatcher = new AntigravityWatcher();
 const claudeWatcher = new ClaudeWatcher();
-const claudeAccountSwitcher = new ClaudeAccountSwitcher();
+// macOS에서는 Claude Code live 자격 증명이 Keychain에 있으므로 플랫폼 저장소를 주입합니다.
+const claudeLiveStore = createClaudeLiveStore();
+const claudeAccountSwitcher = new ClaudeAccountSwitcher({ liveStore: claudeLiveStore });
 const antigravityAccountSwitcher = new AntigravityAccountSwitcher({
   read: async () => JSON.parse(await readCredential("gemini:antigravity")),
   write: async (value) => writeCredential("gemini:antigravity", value),
@@ -1064,9 +1222,37 @@ function appendDebugLog(message) {
   }
 }
 
-// Codex 공식 로그인 흐름을 실행할 .cmd 파일을 만듭니다.
+// macOS에서 더블클릭(shell.openPath)하면 Terminal이 실행하는 .command 셸 스크립트를 만듭니다.
+function writeMacLoginScript(fileName, lines) {
+  const scriptPath = path.join(app.getPath("userData"), fileName);
+  fs.writeFileSync(
+    scriptPath,
+    ["#!/bin/bash", 'export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"', ...lines, 'read -r -p "Press Enter to close..." _', ""].join("\n"),
+    { encoding: "utf8", mode: 0o755 }
+  );
+  return scriptPath;
+}
+
+function quoteShellArgument(value) {
+  return `'${String(value).replace(/'/g, "'\\''")}'`;
+}
+
+// Codex 공식 로그인 흐름을 실행할 스크립트를 만듭니다. (Windows: .cmd / macOS: .command)
 // CodePet은 토큰을 직접 받지 않고, pending profile CODEX_HOME 안에서 `codex login`만 실행하게 합니다.
 function writeCodexLoginScript(profile) {
+  if (process.platform === "darwin") {
+    const codexCommand = resolveCommand("codex", codexCommandCandidates());
+    const scriptPath = writeMacLoginScript("codepet-codex-login.command", [
+      `echo "CodePet Codex Login - ${profile.id}"`,
+      `export CODEX_HOME=${quoteShellArgument(profile.homePath)}`,
+      `${codexCommand ? quoteShellArgument(codexCommand) : "codex"} login`,
+    ]);
+    appendDebugLog(
+      `login script written: ${scriptPath}; profile=${profile.key}; home=${profile.homePath}; codex=${codexCommand || "PATH"}`
+    );
+    return scriptPath;
+  }
+
   const scriptPath = path.join(app.getPath("userData"), "codepet-codex-login.cmd");
   const codexCommand = codexAccountSwitcher.resolveCodexCommandForBatch();
   const codexLoginLine = codexCommand
@@ -1130,12 +1316,12 @@ async function openCodexLoginTerminal() {
 
   try {
     codexAccountSwitcher.ensureCurrentAccountProfile();
+    if (!["win32", "darwin"].includes(process.platform)) {
+      throw new Error("현재 CodePet 로그인 실행기는 Windows/macOS용으로 작성되어 있습니다.");
+    }
+
     const profile = codexAccountSwitcher.createLoginProfile();
     const scriptPath = writeCodexLoginScript(profile);
-
-    if (process.platform !== "win32") {
-      throw new Error("현재 CodePet 로그인 실행기는 Windows용으로 작성되어 있습니다.");
-    }
 
     showCodexAccountBubble(
       "새 Codex 로그인 터미널을 여는 중입니다."
@@ -1236,7 +1422,8 @@ function resolveCommand(command, candidates = []) {
     if (candidate && fs.existsSync(candidate)) return candidate;
   }
   try {
-    const result = spawnSync("where.exe", [command], {
+    const lookup = process.platform === "win32" ? "where.exe" : "which";
+    const result = spawnSync(lookup, [command], {
       encoding: "utf8",
       windowsHide: true,
       timeout: 5000,
@@ -1248,14 +1435,63 @@ function resolveCommand(command, candidates = []) {
   }
 }
 
+// GUI로 실행된 macOS 앱은 셸 PATH를 물려받지 않으므로 자주 쓰이는 설치 경로를 후보로 함께 넘깁니다.
+function claudeCommandCandidates() {
+  if (process.platform === "win32") {
+    return [path.join(os.homedir(), ".local", "bin", "claude.exe")];
+  }
+  return [
+    path.join(os.homedir(), ".local", "bin", "claude"),
+    "/opt/homebrew/bin/claude",
+    "/usr/local/bin/claude",
+  ];
+}
+
+function codexCommandCandidates() {
+  if (process.platform === "win32") return [];
+  return [
+    path.join(os.homedir(), ".local", "bin", "codex"),
+    "/opt/homebrew/bin/codex",
+    "/usr/local/bin/codex",
+  ];
+}
+
 function resolveAntigravityExecutable() {
+  if (process.platform === "darwin") {
+    const appPath = "/Applications/Antigravity.app";
+    return fs.existsSync(appPath) ? appPath : null;
+  }
   return resolveCommand("Antigravity.exe", [
     path.join(process.env.LOCALAPPDATA || "", "Programs", "antigravity", "Antigravity.exe"),
     path.join(process.env.ProgramFiles || "", "Antigravity", "Antigravity.exe"),
   ]);
 }
 
+// osascript로 앱 종료를 요청합니다. 앱이 떠 있지 않아도 실패로 보지 않습니다.
+function quitMacApp(appName, timeoutMs = 15000) {
+  return new Promise((resolve) => {
+    execFile(
+      "osascript",
+      ["-e", `if application "${appName}" is running then quit app "${appName}"`],
+      { timeout: timeoutMs },
+      (error, stdout, stderr) => {
+        resolve({ ok: !error, stdout: String(stdout || "").trim(), stderr: String(stderr || "").trim() });
+      }
+    );
+  });
+}
+
 async function restartAntigravityApp() {
+  if (process.platform === "darwin") {
+    const executable = resolveAntigravityExecutable();
+    if (!executable) throw new Error("AGY 실행 파일을 찾지 못했습니다.");
+    await quitMacApp("Antigravity");
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    const child = spawn("open", ["-a", executable], { detached: true, stdio: "ignore" });
+    child.unref();
+    return true;
+  }
+
   const executable = resolveAntigravityExecutable();
   if (!executable) throw new Error("AGY 실행 파일을 찾지 못했습니다.");
   const executablePath = quotePowerShellString(path.resolve(executable));
@@ -1283,9 +1519,17 @@ Write-Output "Stopped $($processes.Count) AGY process(es)."
 }
 
 function writeClaudeLoginScript() {
-  const scriptPath = path.join(app.getPath("userData"), "codepet-claude-login.cmd");
-  const claudeCommand = resolveCommand("claude", [path.join(os.homedir(), ".local", "bin", "claude.exe")]);
+  const claudeCommand = resolveCommand("claude", claudeCommandCandidates());
   if (!claudeCommand) throw new Error("Claude 명령을 찾지 못했습니다.");
+
+  if (process.platform === "darwin") {
+    return writeMacLoginScript("codepet-claude-login.command", [
+      'echo "CodePet Claude Login"',
+      `${quoteShellArgument(claudeCommand)} auth login`,
+    ]);
+  }
+
+  const scriptPath = path.join(app.getPath("userData"), "codepet-claude-login.cmd");
   fs.writeFileSync(
     scriptPath,
     [
@@ -1303,7 +1547,7 @@ function writeClaudeLoginScript() {
 
 function getClaudeAuthStatus() {
   return new Promise((resolve, reject) => {
-    const command = resolveCommand("claude", [path.join(os.homedir(), ".local", "bin", "claude.exe")]);
+    const command = resolveCommand("claude", claudeCommandCandidates());
     if (!command) {
       reject(new Error("Claude 명령을 찾지 못했습니다."));
       return;
@@ -1340,6 +1584,16 @@ async function stopCodexDesktopApp() {
     return { ok: true, skipped: true, stdout: "Restart disabled by config." };
   }
 
+  if (process.platform === "darwin") {
+    const result = await quitMacApp("Codex", CODEX_DESKTOP_RESTART_CONFIG.timeoutMs);
+    // osascript 실패(자동화 권한 거부/타임아웃)를 성공으로 보고하면, 실제로는 멈추지 않은 앱을
+    // 멈춘 것으로 오인해 사용자에게 "전환됨"이라고 잘못 알립니다. 실제 결과를 그대로 전달합니다.
+    if (!result.ok) {
+      throw new Error(result.stderr || "Codex Desktop 종료에 실패했습니다. (자동화 권한을 확인하세요)");
+    }
+    return { ok: true, skipped: false, stdout: result.stderr || "Codex Desktop quit requested." };
+  }
+
   if (process.platform !== "win32") {
     return { ok: true, skipped: true, stdout: "No Windows process stop needed." };
   }
@@ -1373,6 +1627,15 @@ Write-Output "Stopped $($ids.Count) Codex Desktop process(es)."
 
 // 현재 ~/.codex/auth.json 기준으로 Codex Desktop App을 실행합니다.
 function launchCodexDesktopApp() {
+  if (process.platform === "darwin") {
+    const codexCommand = resolveCommand("codex", codexCommandCandidates());
+    const child = codexCommand
+      ? spawn(codexCommand, ["app"], { detached: true, stdio: "ignore" })
+      : spawn("open", ["-a", "Codex"], { detached: true, stdio: "ignore" });
+    child.unref();
+    return Promise.resolve({ ok: true, skipped: false, stdout: "Launched Codex Desktop." });
+  }
+
   if (process.platform !== "win32") {
     const child = spawn("codex", ["app"], {
       detached: true,
@@ -1480,6 +1743,7 @@ function showCodexAccountBubble(text) {
 function saveCurrentCodexAccount() {
   try {
     const profile = codexAccountSwitcher.saveCurrentAccount();
+    invalidateProxyAccountsCache();
     refreshTrayMenu();
     showCodexAccountBubble(
       `"${profile.label}" 계정을 저장했습니다.\n전환 목록에는 로그인된 계정만 표시됩니다.`
@@ -1525,6 +1789,23 @@ function showCodexAccountSwitchMenu() {
 // Codex Desktop을 먼저 멈추고, 저장된 auth를 ~/.codex/auth.json으로 교체한 뒤 다시 실행합니다.
 // 이미 떠 있는 일반 Codex CLI 터미널 세션은 사용자가 새로 시작해야 합니다.
 async function switchCodexAccount(profileKey) {
+  // 프록시가 실제로 config에 주입되어 트래픽이 프록시를 탈 때만 무재시작 경로를 씁니다.
+  // (start만 되고 주입이 실패한 상태에서 이 경로로 빠지면 전환이 조용히 무시됩니다.)
+  if (codexProxyActive) {
+    try {
+      const result = codexAccountSwitcher.switchToProfile(profileKey);
+      invalidateProxyAccountsCache();
+      refreshTrayMenu();
+      showCodexAccountBubble(
+        `"${result.profile.label}" 계정으로 전환했습니다.\n프록시 모드: 재시작 없이 다음 요청부터 바로 적용됩니다.`
+      );
+      return true;
+    } catch (error) {
+      showCodexAccountBubble(`Codex auth 전환에 실패했습니다.\n${error.message || String(error)}`);
+      return false;
+    }
+  }
+
   try {
     showCodexAccountBubble(
       "Codex Desktop App을 멈추고 계정 전환을 준비하는 중입니다."
@@ -1608,6 +1889,12 @@ function buildTrayMenu() {
     },
     { type: "separator" },
     { label: "계정", submenu: buildProviderAccountSubmenu() },
+    {
+      label: "Codex 재시작 없는 전환 (프록시)",
+      type: "checkbox",
+      checked: isCodexProxyModeEnabled(),
+      click: () => setCodexProxyMode(!isCodexProxyModeEnabled()),
+    },
     {
       label: "펫 바꾸기",
       submenu: buildPetSelectionSubmenu(),
@@ -1768,7 +2055,13 @@ function showContextMenu() {
     },
     { type: "separator" },
     {
-      label: "윈도우 시작 시 자동 실행",
+      label: "Codex 재시작 없는 전환 (프록시)",
+      type: "checkbox",
+      checked: isCodexProxyModeEnabled(),
+      click: () => setCodexProxyMode(!isCodexProxyModeEnabled()),
+    },
+    {
+      label: "로그인 시 자동 실행",
       type: "checkbox",
       checked: isAutoLaunchEnabled(),
       click: toggleAutoLaunch,
@@ -2489,6 +2782,7 @@ function deleteProviderAccount(provider, profileKey) {
         : null;
   if (!switcher) throw new Error("지원하지 않는 계정 유형입니다.");
   const deleted = switcher.deleteProfile(profileKey);
+  if (provider === "codex") invalidateProxyAccountsCache();
   clearUsageCache(provider);
   refreshTrayMenu();
   return deleted;
@@ -3038,6 +3332,10 @@ function registerIpcHandlers() {
 
 // 앱 수명주기 진입점입니다.
 app.whenReady().then(() => {
+  // macOS에서는 데스크톱 펫이 Dock에 남아 있을 이유가 없어 메뉴바(트레이)로만 동작하게 합니다.
+  if (process.platform === "darwin" && app.dock) {
+    app.dock.hide();
+  }
   restoreMovementPreferences();
   registerIpcHandlers();
   registerCodexWatcher();
@@ -3054,6 +3352,7 @@ app.whenReady().then(() => {
   codexWatcher.start();
   antigravityWatcher.start();
   claudeWatcher.start();
+  void restoreCodexProxyMode();
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -3064,6 +3363,7 @@ app.whenReady().then(() => {
 
 app.on("before-quit", () => {
   isQuitting = true;
+  teardownCodexProxyOnQuit();
 });
 
 // 타이머를 모두 정리하고 앱을 종료합니다.
@@ -3188,7 +3488,7 @@ async function loadClaudeProvider(forceUsage) {
 
   let usage;
   try {
-    const data = await fetchClaudeUsage({ force: forceUsage });
+    const data = await fetchClaudeUsage({ force: forceUsage, credentialStore: claudeLiveStore });
     // 토큰 갱신으로 live 파일이 바뀌었을 수 있으므로 최신 값을 다시 저장합니다.
     claudeAccountSwitcher.snapshotCurrent({
       email: status.email,

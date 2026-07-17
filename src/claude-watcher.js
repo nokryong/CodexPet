@@ -71,6 +71,10 @@ function parseClaudeRow(row, file = "") {
 
 class ClaudeWatcher extends ExternalWatcher {
   constructor(options = {}) {
+    // Windows 데스크톱 앱의 Claude Code 세션 저장소입니다.
+    // macOS 데스크톱 앱의 세션 transcript는 ~/.claude/projects에 .jsonl로 함께 기록되므로
+    // 아래 첫 번째 root에서 이미 잡힙니다. (Application Support 쪽은 .json 상태 파일이라
+    // recursiveJsonl과 형식이 달라 별도 root로 추가하지 않습니다.)
     const appDataRoot = process.env.APPDATA
       ? path.join(process.env.APPDATA, "Claude", "claude-code-sessions")
       : null;

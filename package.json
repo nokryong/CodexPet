@@ -19,12 +19,17 @@
     "files": [
       "src/**/*",
       "build/icon.ico",
+      "build/icon.png",
       "package.json"
     ],
     "extraResources": [
       {
         "from": "build/icon.ico",
         "to": "icon.ico"
+      },
+      {
+        "from": "build/icon.png",
+        "to": "icon.png"
       }
     ],
     "win": {
@@ -35,6 +40,14 @@
     },
     "portable": {
       "artifactName": "CodePet-${version}.exe"
+    },
+    "mac": {
+      "icon": "build/icon-mac.png",
+      "category": "public.app-category.utilities",
+      "target": [
+        "dmg",
+        "zip"
+      ]
     }
   },
   "devDependencies": {
