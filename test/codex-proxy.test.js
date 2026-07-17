@@ -1,6 +1,9 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
 const http = require("node:http");
+const os = require("node:os");
+const path = require("node:path");
 
 const {
   CONFIG_MARKER,
@@ -9,6 +12,7 @@ const {
   buildBaseUrlLine,
   injectBaseUrl,
   parseRetryDelayMs,
+  refreshAuthFileIfStale,
   stripCodePetProxyLines,
 } = require("../src/codex-proxy");
 
@@ -71,6 +75,48 @@ test("config 제거는 marker와 그 다음 base_url 줄만 걷어낸다", () =>
 test("JWT exp 클레임으로 만료 시각을 계산하고 형식이 다르면 null을 준다", () => {
   assert.equal(accessTokenExpiresAtMs(fakeJwt({ exp: 1000 })), 1000 * 1000);
   assert.equal(accessTokenExpiresAtMs("not-a-jwt"), null);
+});
+
+test("만료 임박한 Codex 토큰은 refresh token으로 갱신하고 auth 파일에 원자 저장한다", async (t) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "codepet-proxy-refresh-"));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+
+  const authPath = path.join(home, "auth.json");
+  const original = {
+    auth_mode: "chatgpt",
+    tokens: {
+      account_id: "workspace-a",
+      access_token: fakeJwt({ exp: Math.floor(Date.now() / 1000) + 30 }),
+      refresh_token: "refresh-old",
+      id_token: "id-old",
+    },
+  };
+  fs.writeFileSync(authPath, JSON.stringify(original), "utf8");
+
+  let request = null;
+  const refreshed = await refreshAuthFileIfStale(authPath, {
+    fetchImpl: async (url, options) => {
+      request = { url, options };
+      return {
+        ok: true,
+        async json() {
+          return {
+            access_token: fakeJwt({ exp: Math.floor(Date.now() / 1000) + 3600 }),
+            refresh_token: "refresh-new",
+            id_token: "id-new",
+          };
+        },
+      };
+    },
+  });
+
+  const saved = JSON.parse(fs.readFileSync(authPath, "utf8"));
+  assert.match(request.url, /auth\.openai\.com\/oauth\/token$/);
+  assert.equal(JSON.parse(request.options.body).refresh_token, "refresh-old");
+  assert.equal(refreshed.tokens.refresh_token, "refresh-new");
+  assert.equal(saved.tokens.refresh_token, "refresh-new");
+  assert.equal(saved.tokens.account_id, "workspace-a");
+  assert.ok(saved.last_refresh);
 });
 
 test("429 응답의 재시도 지연은 retry-after 헤더와 본문 필드를 순서대로 읽는다", () => {
@@ -168,6 +214,45 @@ test("한도(429)를 맞으면 다음 계정으로 자동 로테이션하고 쿨
     });
     assert.equal(second.status, 200);
     assert.deepEqual(hits, ["Bearer token-b"]);
+  } finally {
+    proxy.stop();
+    upstream.close();
+  }
+});
+
+test("인증 실패(401)를 맞으면 같은 요청을 다음 계정으로 재시도하고 실패 계정을 쿨다운한다", async () => {
+  const hits = [];
+  const upstream = await startUpstream((request, response) => {
+    hits.push(request.headers.authorization);
+    if (request.headers.authorization === "Bearer token-a") {
+      response.writeHead(401, { "content-type": "application/json" });
+      response.end('{"error":"expired"}');
+      return;
+    }
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end('{"ok":"b"}');
+  });
+
+  const proxy = poolProxy({
+    upstreamPort: upstream.address().port,
+    accounts: [
+      { key: "a", label: "A", authPath: "token-a" },
+      { key: "b", label: "B", authPath: "token-b" },
+    ],
+    port: 19186,
+  });
+  const proxyPort = await proxy.start();
+
+  try {
+    const response = await fetch(`http://127.0.0.1:${proxyPort}/v1/responses`, {
+      method: "POST",
+      body: "{}",
+    });
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { ok: "b" });
+    assert.deepEqual(hits, ["Bearer token-a", "Bearer token-b"]);
+    assert.equal(proxy.isCoolingDown("a"), true);
+    assert.equal(proxy.isCoolingDown("b"), false);
   } finally {
     proxy.stop();
     upstream.close();

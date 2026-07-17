@@ -3,8 +3,14 @@ const BASE_WIDTH = 192;
 const BASE_HEIGHT = 208;
 const {
   DEFAULT_SPRITE_ROWS,
+  LOOK_DIRECTION_COUNT,
   SPRITE_COLS,
+  V2_SPRITE_ROWS,
   detectSpriteRows,
+  lookCellForDirection,
+  nearestPlayableDirection,
+  normalizeDirectionIndex,
+  playableFrameColumns,
   stateFrameCount,
 } = globalThis.CodePetSpriteLayout;
 
@@ -25,16 +31,86 @@ const PET_STATES = Object.freeze({
   waiting: { row: 6, frames: 8, fps: 3, loop: true },
   running: { row: 7, frames: 8, fps: 4, loop: true },
   review: { row: 8, frames: 8, fps: 3, loop: true },
+  lookRow9: { row: 9, frames: 8, fps: 4, loop: false, returnTo: "idle", v2Only: true },
+  lookRow10: { row: 10, frames: 8, fps: 4, loop: false, returnTo: "idle", v2Only: true },
 });
 
-function getPetState(stateName = currentStateName) {
-  const normalizedState = Object.prototype.hasOwnProperty.call(PET_STATES, stateName)
+function firstVisibleCell() {
+  if (!frameOccupancy) return null;
+
+  for (let row = 0; row < frameOccupancy.length; row += 1) {
+    for (let column = 0; column < SPRITE_COLS; column += 1) {
+      if (frameOccupancy[row]?.[column]) return { row, column };
+    }
+  }
+
+  return null;
+}
+
+function buildStandardPetState(stateName) {
+  let normalizedState = Object.prototype.hasOwnProperty.call(PET_STATES, stateName)
     ? stateName
     : "idle";
-  const state = PET_STATES[normalizedState];
+  let state = PET_STATES[normalizedState];
+
+  if (state.v2Only && spriteRows !== V2_SPRITE_ROWS) {
+    normalizedState = "idle";
+    state = PET_STATES.idle;
+  }
+
+  const expectedFrames = stateFrameCount(normalizedState, spriteRows, state.frames);
+  const rowOccupancy = frameOccupancy
+    ? frameOccupancy[state.row] || []
+    : null;
+  const columns = playableFrameColumns(rowOccupancy, expectedFrames);
+  let cells = columns.map((column) => ({ row: state.row, column }));
+
+  if (cells.length === 0 && normalizedState !== "idle") {
+    return buildStandardPetState("idle");
+  }
+
+  if (cells.length === 0) {
+    const fallbackCell = firstVisibleCell();
+    if (fallbackCell) cells = [fallbackCell];
+  }
+
   return {
     ...state,
-    frames: stateFrameCount(normalizedState, spriteRows, state.frames),
+    stateName: normalizedState,
+    cells,
+    frames: Math.max(1, cells.length),
+  };
+}
+
+function getPlayableLookDirections() {
+  if (!frameOccupancy) {
+    return Array.from({ length: LOOK_DIRECTION_COUNT }, (_value, index) => index);
+  }
+
+  const playable = [];
+  for (let index = 0; index < LOOK_DIRECTION_COUNT; index += 1) {
+    const cell = lookCellForDirection(index);
+    if (frameOccupancy[cell.row]?.[cell.column]) playable.push(index);
+  }
+  return playable;
+}
+
+function getPetState(stateName = currentStateName) {
+  if (stateName !== "lookDirection") return buildStandardPetState(stateName);
+  if (spriteRows !== V2_SPRITE_ROWS) return buildStandardPetState(currentFallbackState);
+
+  const directionIndex = nearestPlayableDirection(
+    currentDirectionIndex,
+    getPlayableLookDirections()
+  );
+  if (directionIndex === null) return buildStandardPetState(currentFallbackState);
+
+  return {
+    stateName: "lookDirection",
+    cells: [lookCellForDirection(directionIndex)],
+    frames: 1,
+    fps: 8,
+    loop: true,
   };
 }
 
@@ -53,7 +129,10 @@ const errorElement = document.querySelector("#error");
 
 let appConfig = null;
 let spriteImage = null;
+let frameOccupancy = null;
 let currentStateName = "idle";
+let currentDirectionIndex = 0;
+let currentFallbackState = "idle";
 let previousLoopStateName = "idle";
 let currentFrame = 0;
 let animationTimer = null;
@@ -120,25 +199,105 @@ function normalizeStateName(stateName) {
   return "idle";
 }
 
+function normalizeStateRequest(request) {
+  const requestedState = typeof request === "object" && request
+    ? request.state
+    : request;
+
+  if (requestedState === "lookDirection") {
+    return {
+      stateName: "lookDirection",
+      directionIndex: normalizeDirectionIndex(
+        typeof request === "object" ? request.directionIndex : currentDirectionIndex
+      ),
+      fallbackState: normalizeStateName(
+        typeof request === "object" ? request.fallbackState : currentFallbackState
+      ),
+    };
+  }
+
+  return {
+    stateName: normalizeStateName(requestedState),
+    directionIndex: currentDirectionIndex,
+    fallbackState: currentFallbackState,
+  };
+}
+
+function currentStateRequest() {
+  if (currentStateName !== "lookDirection") return currentStateName;
+  return {
+    state: "lookDirection",
+    directionIndex: currentDirectionIndex,
+    fallbackState: currentFallbackState,
+  };
+}
+
+function scanSpriteFrameOccupancy(image, rows) {
+  const scanCanvas = document.createElement("canvas");
+  scanCanvas.width = image.naturalWidth;
+  scanCanvas.height = image.naturalHeight;
+  const scanContext = scanCanvas.getContext("2d", { willReadFrequently: true });
+  if (!scanContext) return null;
+
+  try {
+    scanContext.drawImage(image, 0, 0);
+    const pixels = scanContext.getImageData(
+      0,
+      0,
+      scanCanvas.width,
+      scanCanvas.height
+    ).data;
+    const occupancy = Array.from({ length: rows }, () => Array(SPRITE_COLS).fill(false));
+    const minimumVisiblePixels = 8;
+
+    for (let row = 0; row < rows; row += 1) {
+      const top = Math.floor((row * scanCanvas.height) / rows);
+      const bottom = Math.floor(((row + 1) * scanCanvas.height) / rows);
+
+      for (let column = 0; column < SPRITE_COLS; column += 1) {
+        const left = Math.floor((column * scanCanvas.width) / SPRITE_COLS);
+        const right = Math.floor(((column + 1) * scanCanvas.width) / SPRITE_COLS);
+        let visiblePixels = 0;
+
+        scanCell:
+        for (let y = top; y < bottom; y += 1) {
+          for (let x = left; x < right; x += 1) {
+            if (pixels[(y * scanCanvas.width + x) * 4 + 3] <= 8) continue;
+            visiblePixels += 1;
+            if (visiblePixels >= minimumVisiblePixels) {
+              occupancy[row][column] = true;
+              break scanCell;
+            }
+          }
+        }
+      }
+    }
+
+    return occupancy;
+  } catch (error) {
+    console.warn("[desktop-pet] Failed to inspect transparent sprite cells.", error);
+    return null;
+  }
+}
+
 // 현재 프레임 번호에 맞춰 background-position을 옮깁니다.
 // column은 x축, row는 y축이므로 둘 다 음수 픽셀로 이동해야 원하는 셀이 보입니다.
 function applySpriteFrame() {
   const state = getPetState();
   const safeWidth = currentWidth > 0 ? currentWidth : BASE_WIDTH;
   const safeHeight = currentHeight > 0 ? currentHeight : BASE_HEIGHT;
-  const column = currentFrame % state.frames;
+  const cell = state.cells[currentFrame % state.frames] || null;
 
   resizePetCanvas();
+  if (!spriteImage || !cell) return;
   petContext.clearRect(0, 0, safeWidth, safeHeight);
-
-  if (!spriteImage) return;
 
   const sourceWidth = spriteImage.naturalWidth / SPRITE_COLS;
   const sourceHeight = spriteImage.naturalHeight / spriteRows;
   petContext.drawImage(
     spriteImage,
-    column * sourceWidth,
-    state.row * sourceHeight,
+    cell.column * sourceWidth,
+    cell.row * sourceHeight,
     sourceWidth,
     sourceHeight,
     0,
@@ -181,20 +340,32 @@ function restartAnimationTimer() {
 
 // 외부에서 요청한 상태로 애니메이션을 전환합니다.
 // 단발 상태가 끝나면 돌아갈 수 있도록 loop 상태를 previousLoopStateName에 기억합니다.
-function setAnimationState(nextStateName) {
-  const normalizedState = normalizeStateName(nextStateName);
-  const nextState = getPetState(normalizedState);
+function setAnimationState(request) {
+  const normalized = normalizeStateRequest(request);
+  const previousState = getPetState(currentStateName);
 
-  if (getPetState(currentStateName).loop && currentStateName !== normalizedState) {
-    previousLoopStateName = currentStateName;
+  if (previousState.loop && currentStateName !== normalized.stateName) {
+    previousLoopStateName = currentStateName === "lookDirection"
+      ? currentFallbackState
+      : currentStateName;
   }
 
-  currentStateName = normalizedState;
+  currentStateName = normalized.stateName;
+  currentDirectionIndex = normalized.directionIndex;
+  currentFallbackState = normalized.fallbackState;
   currentFrame = 0;
-  petElement.dataset.state = normalizedState;
+  petElement.dataset.state = currentStateName;
+  if (currentStateName === "lookDirection") {
+    petElement.dataset.lookDirection = String(currentDirectionIndex);
+  } else {
+    delete petElement.dataset.lookDirection;
+  }
 
+  const nextState = getPetState(currentStateName);
   if (nextState.loop) {
-    previousLoopStateName = normalizedState;
+    previousLoopStateName = currentStateName === "lookDirection"
+      ? currentFallbackState
+      : currentStateName;
   }
 
   restartAnimationTimer();
@@ -203,6 +374,7 @@ function setAnimationState(nextStateName) {
 // spritesheet.webp가 없거나 로드에 실패했을 때 작은 창 안에 명확한 메시지를 보여줍니다.
 function showErrorMessage(message) {
   spriteImage = null;
+  frameOccupancy = null;
   petContext.clearRect(0, 0, currentWidth || BASE_WIDTH, currentHeight || BASE_HEIGHT);
   petElement.hidden = true;
   errorElement.hidden = false;
@@ -230,11 +402,12 @@ function applySpriteSheet(config, keepState = false) {
       height: image.naturalHeight,
       spriteVersionNumber: config.spriteVersionNumber,
     });
+    frameOccupancy = scanSpriteFrameOccupancy(image, spriteRows);
     spriteImage = image;
     petElement.dataset.spriteRows = String(spriteRows);
     petElement.hidden = false;
     errorElement.hidden = true;
-    setAnimationState(keepState ? currentStateName : "idle");
+    setAnimationState(keepState ? currentStateRequest() : "idle");
   };
 
   image.onerror = () => {

@@ -187,6 +187,7 @@ class CodexAccountSwitcher {
       accessPayload.chatgpt_account_id ||
       null;
     const accessToken = auth?.tokens?.access_token || auth?.access_token || null;
+    const subject = idPayload.sub || accessPayload.sub || null;
     const email = idPayload.email || accessPayload.email || null;
     const displayId =
       email ||
@@ -201,6 +202,7 @@ class CodexAccountSwitcher {
       authPath,
       accountId,
       accessToken,
+      subject,
       email,
       displayId,
       planType,
@@ -219,6 +221,7 @@ class CodexAccountSwitcher {
         authPath,
         accountId: null,
         accessToken: null,
+        subject: null,
         email: null,
         displayId: null,
         planType: null,
@@ -287,8 +290,24 @@ class CodexAccountSwitcher {
 
   sameIdentity(left, right) {
     if (!left || !right) return false;
-    if (left.accountId && right.accountId && left.accountId === right.accountId) return true;
-    if (!left.email || !right.email || left.email !== right.email) return false;
+
+    // accountId는 개인/Business 워크스페이스를 가리킬 수 있어 여러 사용자가 공유합니다.
+    // 둘 다 있으면 사용자(sub)와 워크스페이스를 함께 비교해야 다른 멤버를 덮어쓰지 않습니다.
+    if (left.accountId && right.accountId) {
+      if (left.accountId !== right.accountId) return false;
+      if (left.subject && right.subject) return left.subject === right.subject;
+      if (left.email && right.email) {
+        return left.email.toLowerCase() === right.email.toLowerCase();
+      }
+      return false;
+    }
+
+    // accountId가 없는 구형 auth끼리는 안정적인 사용자 subject를 우선 사용합니다.
+    if (!left.accountId && !right.accountId && left.subject && right.subject) {
+      return left.subject === right.subject;
+    }
+
+    if (!left.email || !right.email || left.email.toLowerCase() !== right.email.toLowerCase()) return false;
     if ((left.planType || null) !== (right.planType || null)) return false;
     if (left.organization && right.organization && left.organization !== right.organization) return false;
     return true;
