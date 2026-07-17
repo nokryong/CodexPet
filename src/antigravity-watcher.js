@@ -12,8 +12,12 @@ function rowId(row) {
 }
 
 function extractCwd(value) {
-  const match = String(value || "").match(/[A-Za-z]:\\(?:[^\\/:*?"<>|\r\n]+\\?)+/);
-  return match ? match[0].replace(/[.,;:)\]}]+$/, "") : null;
+  const source = String(value || "");
+  const windowsMatch = source.match(/[A-Za-z]:\\(?:[^\\/:*?"<>|\r\n]+\\?)+/);
+  if (windowsMatch) return windowsMatch[0].replace(/[.,;:)\]}]+$/, "");
+  // macOS/리눅스 절대 경로도 표시용 cwd로 사용합니다.
+  const unixMatch = source.match(/(?:^|[\s"'`(])(\/(?:Users|home|opt|var|tmp|private)\/[^\s"'`):\]]+)/);
+  return unixMatch ? unixMatch[1].replace(/[.,;:)\]}]+$/, "") : null;
 }
 
 function toolLabel(type, content) {

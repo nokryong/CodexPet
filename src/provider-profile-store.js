@@ -27,6 +27,8 @@ function secretIdentity(secret) {
     secret?.refreshToken ||
     secret?.token?.refresh_token ||
     secret?.claudeAiOauth?.refreshToken ||
+    // macOS 데스크톱 앱 관리 인증은 refreshToken이 비어 있을 수 있어 accessToken으로 식별합니다.
+    secret?.claudeAiOauth?.accessToken ||
     null
   );
 }
@@ -206,6 +208,7 @@ class ProviderProfileStore {
 module.exports = {
   ProviderProfileStore,
   atomicWrite,
+  atomicWriteText,
   fingerprint,
   normalizeEmail,
   profileFingerprint,

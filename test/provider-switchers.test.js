@@ -202,3 +202,24 @@ test("Claude는 live 활성 계정의 저장 프로필 삭제를 거부한다", 
   assert.throws(() => switcher.deleteProfile(active.key), /현재 사용 중/);
   assert.equal(switcher.deleteProfile(inactive.key).key, inactive.key);
 });
+
+test("Claude 전환은 만료된 accessToken-only 프로필을 거부한다", async (t) => {
+  const home = tempHome(t);
+  atomicWrite(path.join(home, ".claude", ".credentials.json"), claudeSecret("live"));
+  const switcher = new ClaudeAccountSwitcher({ home });
+
+  // refreshToken 없이 이미 만료된 accessToken만 가진 프로필
+  const expired = switcher.store.save({
+    secret: { claudeAiOauth: { accessToken: "old", expiresAt: Date.now() - 60000 } },
+    email: "stale@example.com",
+  });
+  await assert.rejects(() => switcher.switchToProfile(expired.key), /만료/);
+
+  // refreshToken이 있으면 만료 여부와 무관하게 전환 가능
+  const refreshable = switcher.store.save({
+    secret: { claudeAiOauth: { accessToken: "old", refreshToken: "r", expiresAt: Date.now() - 60000 } },
+    email: "ok@example.com",
+  });
+  const result = await switcher.switchToProfile(refreshable.key);
+  assert.equal(result.active, true);
+});

@@ -612,7 +612,7 @@ class CodexAccountSwitcher {
 
   resolveCodexCommandForBatch() {
     try {
-      const result = spawnSync("where.exe", ["codex"], {
+      const result = spawnSync(process.platform === "win32" ? "where.exe" : "which", ["codex"], {
         encoding: "utf8",
         windowsHide: true,
       });
