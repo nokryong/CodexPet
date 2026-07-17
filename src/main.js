@@ -34,6 +34,7 @@ const { normalizeFontFamily } = require("./appearance-settings");
 const { buildAccountSubmenu } = require("./account-submenu");
 const { rateWindowLabel } = require("./codex-usage-label");
 const { commandNeedsShell, selectCommandPath } = require("./command-resolution");
+const { buildWindowsCodexLaunchScript } = require("./codex-desktop-launch");
 const { getInstalledFonts } = require("./installed-fonts");
 const {
   movementPreferencesPatch,
@@ -549,15 +550,17 @@ const codexProxy = new CodexProxy({
   },
 });
 
-// config.toml을 바꾸는 실험적 네트워크 경로이므로 사용자가 명시적으로 켠 경우에만 활성화합니다.
-// 강제 종료 시 다음 CodePet 실행 전까지 죽은 로컬 포트가 남을 수 있어 기본값을 켜짐으로 두지 않습니다.
+// PR에서 약속한 동작대로 신규/기존 설정 모두 기본값은 켜짐입니다.
+// 사용자가 메뉴에서 명시적으로 끈 경우에만 false가 저장됩니다.
 function isCodexProxyModeEnabled() {
-  return readSettings().codexProxyMode === true;
+  return readSettings().codexProxyMode !== false;
 }
 
 // 프록시가 실제로 config.toml에 주입되어 Codex 트래픽이 프록시를 타는 상태인지입니다.
 // start()만 성공하고 주입이 실패하면 running은 true여도 이 값은 false입니다.
 let codexProxyActive = false;
+let codexProxyStartupPromise = null;
+let codexProxyLastError = null;
 
 async function setCodexProxyMode(enabled) {
   try {
@@ -565,6 +568,7 @@ async function setCodexProxyMode(enabled) {
       const port = await codexProxy.start();
       enableProxyInConfig(port);
       codexProxyActive = true;
+      codexProxyLastError = null;
       writeSettings({ codexProxyMode: true });
       showCodexAccountBubble(
         "재시작 없는 전환(프록시)을 켰습니다.\n실행 중인 Codex CLI/앱은 한 번만 다시 시작하면 이후 전환부터는 재시작이 필요 없습니다."
@@ -573,6 +577,7 @@ async function setCodexProxyMode(enabled) {
       disableProxyInConfig();
       codexProxy.stop();
       codexProxyActive = false;
+      codexProxyLastError = null;
       writeSettings({ codexProxyMode: false });
       showCodexAccountBubble("재시작 없는 전환(프록시)을 껐습니다.\nCodex는 원래 방식으로 되돌아갑니다.");
     }
@@ -582,6 +587,7 @@ async function setCodexProxyMode(enabled) {
     if (enabled) {
       // 주입이 실패했으면 Codex가 반쯤 걸린 상태가 되지 않도록 config를 원복하고 완전히 끕니다.
       codexProxyActive = false;
+      codexProxyLastError = error;
       try {
         disableProxyInConfig();
       } catch {
@@ -608,13 +614,14 @@ async function restoreCodexProxyMode() {
     const port = await codexProxy.start();
     enableProxyInConfig(port);
     codexProxyActive = true;
+    codexProxyLastError = null;
   } catch (error) {
     // 주입 실패(예: 사용자가 직접 openai_base_url을 설정)면 프록시를 완전히 끕니다.
     // 그래야 switchCodexAccount가 프록시 경로로 잘못 빠져 조용히 아무것도 안 하는 상황을 막습니다.
     appendDebugLog(`codex proxy restore failed: ${error.message || String(error)}`);
     codexProxyActive = false;
+    codexProxyLastError = error;
     codexProxy.stop();
-    writeSettings({ codexProxyMode: false });
   }
 }
 
@@ -1647,32 +1654,10 @@ function launchCodexDesktopApp() {
     return Promise.resolve({ ok: true, skipped: false, stdout: "Launched codex app." });
   }
 
-  const codexCommand = codexAccountSwitcher.resolveCodexCommandForBatch();
-  const codexLaunchLine = codexCommand ? `${quoteCmdArgument(codexCommand)} app` : "codex app";
-  const codexLaunchLinePs = quotePowerShellString(codexLaunchLine);
-  const hasResolvedCodexCommand = codexCommand ? "$true" : "$false";
-
-  const command = `
-$ErrorActionPreference = 'Stop'
-$codexLaunchLine = ${codexLaunchLinePs}
-$hasResolvedCodexCommand = ${hasResolvedCodexCommand}
-if ($hasResolvedCodexCommand -or (Get-Command codex -ErrorAction SilentlyContinue)) {
-  Start-Process -FilePath 'cmd.exe' -ArgumentList @('/d','/s','/c',$codexLaunchLine) -WindowStyle Hidden
-} else {
-  $appExe = Get-ChildItem -LiteralPath 'C:\\Program Files\\WindowsApps' -Filter 'OpenAI.Codex_*' -Directory -ErrorAction SilentlyContinue |
-    Sort-Object LastWriteTime -Descending |
-    ForEach-Object { Join-Path $_.FullName 'app\\Codex.exe' } |
-    Where-Object { Test-Path -LiteralPath $_ } |
-    Select-Object -First 1
-  if (-not $appExe) {
-    throw 'codex command and Codex Desktop executable were not found.'
-  }
-  Start-Process -FilePath $appExe
-}
-Write-Output "Codex Desktop launch requested."
-`.trim();
-
-  return runHiddenPowerShell(command, CODEX_DESKTOP_RESTART_CONFIG.timeoutMs).then((result) => {
+  return runHiddenPowerShell(
+    buildWindowsCodexLaunchScript(),
+    CODEX_DESKTOP_RESTART_CONFIG.timeoutMs
+  ).then((result) => {
     if (!result.ok) {
       throw new Error(result.stderr || result.stdout || "Codex Desktop launch failed.");
     }
@@ -1791,6 +1776,19 @@ function showCodexAccountSwitchMenu() {
 // Codex Desktop을 먼저 멈추고, 저장된 auth를 ~/.codex/auth.json으로 교체한 뒤 다시 실행합니다.
 // 이미 떠 있는 일반 Codex CLI 터미널 세션은 사용자가 새로 시작해야 합니다.
 async function switchCodexAccount(profileKey) {
+  const proxyModeRequested = isCodexProxyModeEnabled();
+  if (proxyModeRequested && codexProxyStartupPromise) {
+    await codexProxyStartupPromise;
+  }
+
+  if (proxyModeRequested && !codexProxyActive) {
+    const reason = codexProxyLastError?.message || "프록시가 아직 활성화되지 않았습니다.";
+    showCodexAccountBubble(
+      `Codex 계정을 전환하지 않았습니다.\n재시작 없는 프록시 모드 시작에 실패했습니다.\n${reason}`
+    );
+    return false;
+  }
+
   // 프록시가 실제로 config에 주입되어 트래픽이 프록시를 탈 때만 무재시작 경로를 씁니다.
   // (start만 되고 주입이 실패한 상태에서 이 경로로 빠지면 전환이 조용히 무시됩니다.)
   if (codexProxyActive) {
@@ -3354,7 +3352,8 @@ app.whenReady().then(() => {
   codexWatcher.start();
   antigravityWatcher.start();
   claudeWatcher.start();
-  void restoreCodexProxyMode();
+  codexProxyStartupPromise = restoreCodexProxyMode();
+  void codexProxyStartupPromise;
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) {

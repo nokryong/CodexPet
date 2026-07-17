@@ -220,6 +220,45 @@ test("한도(429)를 맞으면 다음 계정으로 자동 로테이션하고 쿨
   }
 });
 
+test("인증 실패(401)를 맞으면 같은 요청을 다음 계정으로 재시도하고 실패 계정을 쿨다운한다", async () => {
+  const hits = [];
+  const upstream = await startUpstream((request, response) => {
+    hits.push(request.headers.authorization);
+    if (request.headers.authorization === "Bearer token-a") {
+      response.writeHead(401, { "content-type": "application/json" });
+      response.end('{"error":"expired"}');
+      return;
+    }
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end('{"ok":"b"}');
+  });
+
+  const proxy = poolProxy({
+    upstreamPort: upstream.address().port,
+    accounts: [
+      { key: "a", label: "A", authPath: "token-a" },
+      { key: "b", label: "B", authPath: "token-b" },
+    ],
+    port: 19186,
+  });
+  const proxyPort = await proxy.start();
+
+  try {
+    const response = await fetch(`http://127.0.0.1:${proxyPort}/v1/responses`, {
+      method: "POST",
+      body: "{}",
+    });
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { ok: "b" });
+    assert.deepEqual(hits, ["Bearer token-a", "Bearer token-b"]);
+    assert.equal(proxy.isCoolingDown("a"), true);
+    assert.equal(proxy.isCoolingDown("b"), false);
+  } finally {
+    proxy.stop();
+    upstream.close();
+  }
+});
+
 test("모든 계정이 한도 초과면 마지막 429 응답을 그대로 전달한다", async () => {
   const upstream = await startUpstream((request, response) => {
     response.writeHead(429, { "content-type": "application/json" });
