@@ -64,6 +64,13 @@ function classifyShellCommand(command) {
   ].some((pattern) => pattern.test(normalized));
   if (isBuild) return { kind: "build", command: text };
 
+  const isRead = [
+    /\b(get-content|select-string|get-childitem|measure-object)\b/,
+    /(^|[;&|]\s*)(rg|grep|findstr|dir|ls)\b/,
+    /(^|[;&|]\s*)git\s+(status|diff|show|log|ls-files)\b/,
+  ].some((pattern) => pattern.test(normalized));
+  if (isRead) return { kind: "read", command: text };
+
   return { kind: "command", command: text };
 }
 
@@ -748,6 +755,17 @@ class CodexWatcher extends EventEmitter {
       const context = this.setWorking(filePath);
       this.emit("tool-activity", {
         ...classifyShellCommand(args.command),
+        threadId,
+        ...context,
+      });
+      return;
+    }
+
+    if (/(^|__)(read|open|find|search|list|view_image)/.test(name)) {
+      const context = this.setWorking(filePath);
+      this.emit("tool-activity", {
+        kind: "read",
+        command: null,
         threadId,
         ...context,
       });

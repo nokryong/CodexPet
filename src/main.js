@@ -33,6 +33,18 @@ const {
   movementPreferencesPatch,
   normalizeMovementPreferences,
 } = require("./movement-preferences");
+const {
+  advanceRoamingPosition,
+  createRoamingVector,
+  hasBlockingMovementReasons,
+  isActivityOnlyReason,
+} = require("./movement-policy");
+const {
+  DEFAULT_SPRITE_ROWS,
+  V2_SPRITE_ROWS,
+  detectSpriteRows,
+  directionIndexFromVector,
+} = require("./sprite-layout");
 
 app.commandLine.appendSwitch("disable-features", "CalculateNativeWinOcclusion");
 
@@ -103,8 +115,8 @@ const MOVEMENT_CONFIG = Object.freeze({
   dragDirectionThresholdPx: 2,
   minWalkMs: 3200,
   maxWalkMs: 6500,
-  minIdleMs: 900,
-  maxIdleMs: 2200,
+  minIdleMs: 2100,
+  maxIdleMs: 3300,
   idleAfterDragMs: 900,
   idleAfterReactionMs: 650,
 });
@@ -140,6 +152,8 @@ const STATE_TIMING = Object.freeze({
   waiting: { frames: 8, fps: 3 },
   running: { frames: 8, fps: 4 },
   review: { frames: 8, fps: 3 },
+  lookRow9: { frames: 8, fps: 4 },
+  lookRow10: { frames: 8, fps: 4 },
 });
 
 // 내장 기본 스프라이트입니다. 아래 우선순위에서 마지막 fallback으로만 사용합니다.
@@ -147,6 +161,7 @@ const SPRITE_ASSET = Object.freeze({
   fileName: "spritesheet.webp",
   filePath: path.join(__dirname, "default-pet", "spritesheet.webp"),
   mimeType: "image/webp",
+  spriteVersionNumber: 2,
 });
 
 // Codex CLI가 설치한 펫 에셋 폴더입니다. 폴더마다 pet.json + spritesheet.webp가 들어 있고,
@@ -322,7 +337,12 @@ function listAvailablePets() {
   }
 
   if (fs.existsSync(SPRITE_ASSET.filePath)) {
-    pets.push({ key: "builtin", label: "기본 펫 (내장)", spritePath: SPRITE_ASSET.filePath });
+    pets.push({
+      key: "builtin",
+      label: "기본 펫 (내장)",
+      spritePath: SPRITE_ASSET.filePath,
+      spriteVersionNumber: SPRITE_ASSET.spriteVersionNumber,
+    });
   }
 
   return pets;
@@ -335,6 +355,22 @@ function resolveSelectedPet() {
 
   const savedKey = readSettings().petKey;
   return pets.find((pet) => pet.key === savedKey) || pets[0];
+}
+
+function detectPetSpriteRows(pet = resolveSelectedPet()) {
+  if (!pet?.spritePath) return null;
+
+  try {
+    const size = nativeImage.createFromPath(pet.spritePath).getSize();
+    return detectSpriteRows({
+      width: size.width,
+      height: size.height,
+      spriteVersionNumber: pet.spriteVersionNumber,
+    });
+  } catch (error) {
+    console.warn("[desktop-pet] Failed to detect sprite rows for menu.", error.message);
+    return Number(pet.spriteVersionNumber) === 2 ? V2_SPRITE_ROWS : null;
+  }
 }
 
 // 스프라이트 파일을 renderer가 바로 쓸 수 있는 data URL로 바꿉니다.
@@ -376,7 +412,9 @@ function applyPet(petKey) {
   writeSettings({ petKey });
 
   const pet = resolveSelectedPet();
-  if (!pet || !petWindow || petWindow.isDestroyed()) return;
+  if (!pet) return;
+  runtime.spriteRows = detectPetSpriteRows(pet) || DEFAULT_SPRITE_ROWS;
+  if (!petWindow || petWindow.isDestroyed()) return;
 
   petWindow.webContents.send(IPC_CHANNELS.SET_SPRITE, createSpritePayload(pet));
   refreshTrayMenu();
@@ -452,7 +490,13 @@ const runtime = {
   x: 0,
   y: 0,
   direction: 1,
+  velocityX: 1,
+  velocityY: 0,
+  spriteRows: DEFAULT_SPRITE_ROWS,
+  idleState: "waiting",
   currentState: "idle",
+  lookDirectionIndex: null,
+  lookFallbackState: "idle",
   movementPhase: "idle",
   manualPaused: false,
   pauseReasons: new Set(),
@@ -473,6 +517,14 @@ function randomBetween(min, max) {
   return min + Math.floor(Math.random() * (max - min + 1));
 }
 
+function chooseRandomIdleState() {
+  const states = ["waiting", "failed"];
+  if (runtime.spriteRows === V2_SPRITE_ROWS) {
+    states.push("lookRow10", "lookRow9");
+  }
+  return states[Math.floor(Math.random() * states.length)];
+}
+
 // renderer/preload에서 넘어온 드래그 좌표가 실제 숫자인지 확인합니다.
 // 좌표가 undefined나 NaN이면 BrowserWindow.setPosition이 main process 예외를 터뜨리므로 먼저 걸러냅니다.
 function isValidScreenPoint(screenPoint) {
@@ -486,12 +538,24 @@ function isValidScreenPoint(screenPoint) {
 // 여러 pause reason이 겹쳤을 때 화면에 보여줄 상태를 정합니다.
 // 예: Codex 작업 중(review) 사용자가 클릭해서 waving을 재생한 뒤에는 idle이 아니라 review로 돌아가야 합니다.
 function getActivePauseState() {
-  for (const reason of ["codex", "drag", "reaction"]) {
+  for (const reason of ["drag", "reaction"]) {
     const stateName = runtime.pauseStates.get(reason);
     if (stateName) return stateName;
   }
 
-  return runtime.pauseStates.values().next().value || "idle";
+  for (const [reason, stateName] of runtime.pauseStates) {
+    if (!isActivityOnlyReason(reason) && stateName) return stateName;
+  }
+
+  return "idle";
+}
+
+function getActivityPetState() {
+  return runtime.pauseStates.get("codex") || null;
+}
+
+function hasBlockingPauseReasons() {
+  return hasBlockingMovementReasons(runtime.pauseReasons);
 }
 
 // 현재 펫이 있는 모니터의 사용 가능한 영역을 가져옵니다.
@@ -505,8 +569,8 @@ function getCurrentWorkArea(x = runtime.x, y = runtime.y) {
 }
 
 // 창이 화면 밖으로 나가지 않도록 좌표를 workArea 안쪽으로 제한합니다.
-function clampToWorkArea(nextX, nextY) {
-  const area = getCurrentWorkArea(nextX, nextY);
+function clampToWorkArea(nextX, nextY, preferredArea = null) {
+  const area = preferredArea || getCurrentWorkArea(nextX, nextY);
   const maxX = area.x + area.width - runtime.width;
   const maxY = area.y + area.height - runtime.height;
 
@@ -517,14 +581,14 @@ function clampToWorkArea(nextX, nextY) {
 }
 
 // BrowserWindow의 실제 위치를 runtime과 동기화해서 이동시킵니다.
-function moveWindowTo(nextX, nextY) {
+function moveWindowTo(nextX, nextY, { workArea = null } = {}) {
   if (!petWindow || petWindow.isDestroyed()) return;
   if (!Number.isFinite(nextX) || !Number.isFinite(nextY)) {
     console.warn("[desktop-pet] Invalid window position ignored.", nextX, nextY);
     return;
   }
 
-  const clamped = clampToWorkArea(nextX, nextY);
+  const clamped = clampToWorkArea(nextX, nextY, workArea);
   runtime.x = clamped.x;
   runtime.y = clamped.y;
   const bounds = createStableWindowBounds(
@@ -552,10 +616,102 @@ function moveWindowTo(nextX, nextY) {
 // 상태 이름을 잘못 보내도 renderer가 idle로 fallback하지만, main에서도 최대한 명확히 관리합니다.
 function sendPetState(stateName) {
   runtime.currentState = stateName;
+  runtime.lookDirectionIndex = null;
+  runtime.lookFallbackState = "idle";
 
   if (petWindow && !petWindow.isDestroyed()) {
     petWindow.webContents.send(IPC_CHANNELS.SET_STATE, stateName);
   }
+}
+
+function sendLookDirectionState(directionIndex, fallbackState) {
+  const normalizedDirection = ((Math.round(Number(directionIndex) || 0) % 16) + 16) % 16;
+  const normalizedFallback = fallbackState === "runningLeft"
+    ? "runningLeft"
+    : fallbackState === "runningRight"
+      ? "runningRight"
+      : "idle";
+
+  runtime.currentState = "lookDirection";
+  runtime.lookDirectionIndex = normalizedDirection;
+  runtime.lookFallbackState = normalizedFallback;
+
+  if (petWindow && !petWindow.isDestroyed()) {
+    petWindow.webContents.send(IPC_CHANNELS.SET_STATE, {
+      state: "lookDirection",
+      directionIndex: normalizedDirection,
+      fallbackState: normalizedFallback,
+    });
+  }
+}
+
+function ensurePetState(stateName) {
+  if (runtime.currentState === stateName && runtime.lookDirectionIndex === null) return;
+  sendPetState(stateName);
+}
+
+function ensureLookDirectionState(directionIndex, fallbackState) {
+  if (
+    runtime.currentState === "lookDirection" &&
+    runtime.lookDirectionIndex === directionIndex &&
+    runtime.lookFallbackState === fallbackState
+  ) {
+    return;
+  }
+  sendLookDirectionState(directionIndex, fallbackState);
+}
+
+function resendCurrentPetState() {
+  if (runtime.currentState === "lookDirection" && runtime.lookDirectionIndex !== null) {
+    sendLookDirectionState(runtime.lookDirectionIndex, runtime.lookFallbackState);
+    return;
+  }
+  sendPetState(runtime.currentState || "idle");
+}
+
+function ensureMouseLookState() {
+  const mouse = screen.getCursorScreenPoint();
+  const deltaX = mouse.x - (runtime.x + runtime.width / 2);
+  const deltaY = mouse.y - (runtime.y + runtime.height / 2);
+  const directionIndex = directionIndexFromVector(deltaX, deltaY);
+  if (directionIndex === null) {
+    ensurePetState(runtime.idleState || "waiting");
+    return;
+  }
+  ensureLookDirectionState(directionIndex, "idle");
+}
+
+function ensureRoamingMotionState() {
+  ensurePetState(runtime.direction > 0 ? "runningRight" : "runningLeft");
+}
+
+function syncMovementAnimation() {
+  if (runtime.manualPaused) {
+    ensurePetState("idle");
+    return;
+  }
+  if (hasBlockingPauseReasons()) {
+    ensurePetState(getActivePauseState());
+    return;
+  }
+
+  if (!runtime.followMouse && runtime.movementPhase === "walking") {
+    ensureRoamingMotionState();
+    return;
+  }
+
+  if (runtime.followMouse) {
+    ensureMouseLookState();
+    return;
+  }
+
+  const activityState = getActivityPetState();
+  if (activityState) {
+    ensurePetState(activityState);
+    return;
+  }
+
+  ensurePetState(runtime.idleState || "waiting");
 }
 
 // 지정 시간 뒤에 다음 이동 phase로 넘어가도록 예약합니다.
@@ -569,6 +725,12 @@ function schedulePhase(callback, delayMs) {
 function pauseAutoMovement(reason, stateName = "idle") {
   runtime.pauseReasons.add(reason);
   runtime.pauseStates.set(reason, stateName);
+
+  if (isActivityOnlyReason(reason)) {
+    syncMovementAnimation();
+    return;
+  }
+
   runtime.movementPhase = "paused";
   clearTimeout(phaseTimer);
   sendPetState(stateName);
@@ -585,23 +747,39 @@ function resumeAutoMovement(reason, delayMs = 0) {
     return;
   }
 
-  if (runtime.pauseReasons.size > 0) {
+  if (hasBlockingPauseReasons()) {
     sendPetState(getActivePauseState());
     return;
   }
 
+  if (isActivityOnlyReason(reason)) {
+    syncMovementAnimation();
+    return;
+  }
+
+  if (runtime.followMouse) {
+    runtime.movementPhase = "looking";
+    syncMovementAnimation();
+    return;
+  }
+
   runtime.movementPhase = "idle";
-  sendPetState("idle");
+  runtime.idleState = chooseRandomIdleState();
+  ensurePetState(getActivityPetState() || runtime.idleState);
   schedulePhase(beginWalkingPhase, delayMs);
 }
 
 // 걸어가는 phase를 시작합니다.
 // 방향에 따라 runningRight/runningLeft 상태를 renderer에 보냅니다.
 function beginWalkingPhase() {
-  if (runtime.manualPaused || runtime.pauseReasons.size > 0) return;
+  if (runtime.manualPaused || hasBlockingPauseReasons() || runtime.followMouse) return;
 
+  const vector = createRoamingVector();
+  runtime.velocityX = vector.x;
+  runtime.velocityY = vector.y;
+  if (Math.abs(vector.x) >= 0.05) runtime.direction = vector.x > 0 ? 1 : -1;
   runtime.movementPhase = "walking";
-  sendPetState(runtime.direction > 0 ? "runningRight" : "runningLeft");
+  ensureRoamingMotionState();
 
   const walkMs = randomBetween(MOVEMENT_CONFIG.minWalkMs, MOVEMENT_CONFIG.maxWalkMs);
   schedulePhase(beginIdlePhase, walkMs);
@@ -610,10 +788,11 @@ function beginWalkingPhase() {
 // 잠시 멈추는 phase를 시작합니다.
 // 이동과 대기를 번갈아 쓰면 펫이 더 자연스럽게 보이고, idle 애니메이션도 확인하기 쉽습니다.
 function beginIdlePhase() {
-  if (runtime.manualPaused || runtime.pauseReasons.size > 0) return;
+  if (runtime.manualPaused || hasBlockingPauseReasons() || runtime.followMouse) return;
 
   runtime.movementPhase = "idle";
-  sendPetState("idle");
+  runtime.idleState = chooseRandomIdleState();
+  ensurePetState(getActivityPetState() || runtime.idleState);
 
   const idleMs = randomBetween(MOVEMENT_CONFIG.minIdleMs, MOVEMENT_CONFIG.maxIdleMs);
   schedulePhase(beginWalkingPhase, idleMs);
@@ -621,56 +800,34 @@ function beginIdlePhase() {
 
 function updateMovementTick() {
   if (!petWindow || petWindow.isDestroyed()) return;
-  if (runtime.manualPaused || runtime.pauseReasons.size > 0) return;
+  if (runtime.manualPaused || hasBlockingPauseReasons()) return;
 
   if (runtime.followMouse) {
-    const mouse = screen.getCursorScreenPoint();
-    const centerX = runtime.x + runtime.width / 2;
-    const centerY = runtime.y + runtime.height / 2;
-    const dx = mouse.x - centerX;
-    const dy = mouse.y - centerY;
-    const dist = Math.hypot(dx, dy);
-
-    if (dist > MOVEMENT_CONFIG.speedPxPerTick * 2) {
-      const nextX = runtime.x + (dx / dist) * MOVEMENT_CONFIG.speedPxPerTick;
-      const nextY = runtime.y + (dy / dist) * MOVEMENT_CONFIG.speedPxPerTick;
-      
-      const nextDirection = dx > 0 ? 1 : -1;
-      runtime.direction = nextDirection;
-      
-      const nextState = nextDirection > 0 ? "runningRight" : "runningLeft";
-      if (runtime.currentState !== nextState) {
-        sendPetState(nextState);
-      }
-      
-      moveWindowTo(nextX, nextY);
-    } else {
-      if (runtime.currentState !== "idle" && runtime.currentState !== "waving") {
-        sendPetState("idle");
-      }
-    }
+    syncMovementAnimation();
     return;
   }
 
   if (runtime.movementPhase !== "walking") return;
 
   const area = getCurrentWorkArea();
-  let nextX = runtime.x + runtime.direction * MOVEMENT_CONFIG.speedPxPerTick;
-  let nextY = runtime.y;
+  const next = advanceRoamingPosition({
+    x: runtime.x,
+    y: runtime.y,
+    width: runtime.width,
+    height: runtime.height,
+    velocityX: runtime.velocityX,
+    velocityY: runtime.velocityY,
+    speed: MOVEMENT_CONFIG.speedPxPerTick,
+    workArea: area,
+    previousDirection: runtime.direction,
+  });
+  if (!next) return;
 
-  if (nextX <= area.x) {
-    nextX = area.x;
-    runtime.direction = 1;
-    sendPetState("runningRight");
-  }
-
-  if (nextX + runtime.width >= area.x + area.width) {
-    nextX = area.x + area.width - runtime.width;
-    runtime.direction = -1;
-    sendPetState("runningLeft");
-  }
-
-  moveWindowTo(nextX, nextY);
+  runtime.velocityX = next.velocityX;
+  runtime.velocityY = next.velocityY;
+  runtime.direction = next.direction;
+  ensureRoamingMotionState();
+  moveWindowTo(next.x, next.y);
 }
 
 // 앱 시작 시 펫을 기본 모니터의 아래쪽 근처에 배치합니다.
@@ -730,9 +887,15 @@ function stopMovementLoop() {
 // resetPosition이 true면 앱 시작처럼 화면 아래쪽에 새로 배치하고,
 // false면 트레이에서 다시 보이게 할 때처럼 사용자가 마지막으로 둔 위치를 유지합니다.
 function startMovementLoop({ resetPosition = true } = {}) {
+  const activityState = getActivityPetState();
+  runtime.spriteRows = detectPetSpriteRows() || DEFAULT_SPRITE_ROWS;
   stopMovementLoop();
   runtime.pauseReasons.clear();
   runtime.pauseStates.clear();
+  if (activityState) {
+    runtime.pauseReasons.add("codex");
+    runtime.pauseStates.set("codex", activityState);
+  }
   runtime.movementPhase = "idle";
 
   if (resetPosition) {
@@ -741,7 +904,12 @@ function startMovementLoop({ resetPosition = true } = {}) {
     moveWindowTo(runtime.x, runtime.y);
   }
 
-  beginIdlePhase();
+  if (runtime.followMouse) {
+    runtime.movementPhase = "looking";
+    syncMovementAnimation();
+  } else {
+    beginIdlePhase();
+  }
   movementTimer = setInterval(updateMovementTick, MOVEMENT_CONFIG.tickMs);
 }
 
@@ -808,7 +976,12 @@ function toggleManualPause() {
     return;
   }
 
-  beginIdlePhase();
+  if (runtime.followMouse) {
+    runtime.movementPhase = "looking";
+    syncMovementAnimation();
+  } else {
+    beginIdlePhase();
+  }
   refreshTrayMenu();
 }
 
@@ -1503,7 +1676,7 @@ function showPetWindowFromTray() {
   petWindow.showInactive();
   petWindow.moveTop();
   startMovementLoop({ resetPosition: false });
-  sendPetState(runtime.currentState || "idle");
+  resendCurrentPetState();
   refreshPetSprite({ force: true });
   refreshTrayMenu();
 }
@@ -1531,11 +1704,37 @@ function toggleFollowMouse() {
 
   if (runtime.followMouse) {
     clearTimeout(phaseTimer);
+    runtime.movementPhase = "looking";
+    syncMovementAnimation();
   } else if (petWindow && !petWindow.isDestroyed() && petWindow.isVisible()) {
     beginIdlePhase();
   }
 
   refreshTrayMenu();
+}
+
+function buildManualMotionSubmenu() {
+  const motions = [
+    { label: "기본 대기", click: () => playManualReaction("idle") },
+    { label: "인사", click: () => playManualReaction("waving") },
+    { label: "점프", click: () => playManualReaction("jumping") },
+    { label: "축 처짐", click: () => playManualReaction("failed") },
+    { label: "대기", click: () => playManualReaction("waiting") },
+    { label: "검토 중", click: () => playManualReaction("review") },
+    { label: "작업 중", click: () => playManualReaction("running") },
+    { label: "오른쪽 이동", click: () => playManualReaction("runningRight") },
+    { label: "왼쪽 이동", click: () => playManualReaction("runningLeft") },
+  ];
+
+  if (detectPetSpriteRows() === V2_SPRITE_ROWS) {
+    motions.push(
+      { type: "separator" },
+      { label: "왼쪽 둘러보기", click: () => playManualReaction("lookRow10") },
+      { label: "오른쪽 둘러보기", click: () => playManualReaction("lookRow9") }
+    );
+  }
+
+  return motions;
 }
 
 // renderer가 우클릭을 감지하면 main process에서 네이티브 메뉴를 띄웁니다.
@@ -1565,44 +1764,7 @@ function showContextMenu() {
     { type: "separator" },
     {
       label: "모션 실행",
-      submenu: [
-        {
-          label: "기본 대기",
-          click: () => playManualReaction("idle"),
-        },
-        {
-          label: "인사",
-          click: () => playManualReaction("waving"),
-        },
-        {
-          label: "점프",
-          click: () => playManualReaction("jumping"),
-        },
-        {
-          label: "축 처짐",
-          click: () => playManualReaction("failed"),
-        },
-        {
-          label: "대기",
-          click: () => playManualReaction("waiting"),
-        },
-        {
-          label: "검토 중",
-          click: () => playManualReaction("review"),
-        },
-        {
-          label: "작업 중",
-          click: () => playManualReaction("running"),
-        },
-        {
-          label: "오른쪽 이동",
-          click: () => playManualReaction("runningRight"),
-        },
-        {
-          label: "왼쪽 이동",
-          click: () => playManualReaction("runningLeft"),
-        },
-      ],
+      submenu: buildManualMotionSubmenu(),
     },
     { type: "separator" },
     {
@@ -1630,6 +1792,7 @@ function handleDragStart(screenPoint) {
   }
 
   const bounds = petWindow.getBounds();
+  const initialDragState = runtime.direction > 0 ? "runningRight" : "runningLeft";
   dragSession = {
     startScreenX: screenPoint.screenX,
     startScreenY: screenPoint.screenY,
@@ -1637,10 +1800,10 @@ function handleDragStart(screenPoint) {
     lastScreenY: screenPoint.screenY,
     startWindowX: bounds.x,
     startWindowY: bounds.y,
-    stateName: "idle",
+    stateName: initialDragState,
   };
 
-  pauseAutoMovement("drag", "idle");
+  pauseAutoMovement("drag", initialDragState);
 }
 
 // renderer에서 넘어온 현재 마우스 screen 좌표를 기준으로 창 위치를 갱신합니다.
@@ -1728,7 +1891,7 @@ function recoverPetWindowVisuals({ forceSprite = false } = {}) {
     }
 
     petWindow.moveTop();
-    sendPetState(runtime.currentState || "idle");
+    resendCurrentPetState();
     refreshPetSprite({ force: forceSprite || !wasVisible });
     refreshTrayMenu();
     return true;
@@ -2089,10 +2252,18 @@ function removeCodexActivityBubble(threadId) {
   activeActivityBubbles.remove(threadId);
 }
 
+function didTaskFail(result) {
+  return Boolean(
+    result?.success === false ||
+    result?.error ||
+    ["aborted", "failed", "error"].includes(result?.reason)
+  );
+}
+
 function registerCodexWatcher() {
   codexWatcher.on("working-changed", (isWorking, result, context) => {
     if (isWorking) {
-      // 작업 중에는 자동 이동을 멈추고 "살펴보기" 모션을 재생합니다.
+      // 요청을 처음 받으면 검토 모션으로 시작하고, 뒤의 세부 이벤트에서 읽기/쓰기를 구분합니다.
       pauseAutoMovement("codex", "review");
       if (context?.activityChange === "removed") {
         removeCodexActivityBubble(context.threadId);
@@ -2126,10 +2297,8 @@ function registerCodexWatcher() {
   // 전역 working 상태와 별개로 세션별 완료를 받아야 동시에 실행한 작업도 정확한 채팅으로 열 수 있습니다.
   codexWatcher.on("task-finished", (result) => {
     removeCodexActivityBubble(result?.threadId);
-    const aborted = result?.reason === "aborted";
-    if (!result?.otherTasksWorking && !isAnyProviderWorking()) {
-      playReaction(aborted ? "failed" : "jumping");
-    }
+    const failed = didTaskFail(result);
+    playReaction(failed ? "failed" : "jumping");
 
     const primaryAction = result?.threadId
       ? {
@@ -2140,12 +2309,12 @@ function registerCodexWatcher() {
 
     const completionVisible = showWatcherActivityBubble({
       kind: "activity",
-      title: formatActivityTitle(aborted ? "작업 중단" : "작업 완료", result),
+      title: formatActivityTitle(failed ? "작업 실패" : "작업 완료", result),
       busy: false,
-      text: aborted
-        ? "작업이 중단됐어요."
+      text: failed
+        ? "작업 중 문제가 발생했어요."
         : truncateForBubble(result?.message) || "Codex 작업이 끝났어요.",
-      statusText: aborted ? "Codex 작업이 중단됐습니다." : "Codex 작업이 완료됐습니다.",
+      statusText: failed ? "Codex 작업 중 문제가 발생했습니다." : "Codex 작업이 완료됐습니다.",
       primaryAction,
       clickHint: primaryAction ? "클릭해서 Codex에서 열기" : null,
     });
@@ -2171,7 +2340,7 @@ function registerCodexWatcher() {
 
   codexWatcher.on("agent-message", (message, context) => {
     if (!codexWatcher.working) return;
-    pauseAutoMovement("codex", "review");
+    pauseAutoMovement("codex", "running");
     showCodexActivityBubble({
       kind: "activity",
       title: "응답 작성 중",
@@ -2201,11 +2370,15 @@ function registerCodexWatcher() {
       title = "자료 확인 중";
       text = activity.query ? `웹 검색: ${truncateForBubble(activity.query)}` : "웹 검색 중";
       statusText = "Codex가 자료를 확인하고 있습니다.";
+    } else if (activity.kind === "read") {
+      title = "파일 확인 중";
+      text = activity.command ? `읽기: ${truncateForBubble(activity.command)}` : "파일을 읽고 있어요.";
+      statusText = "Codex가 파일을 확인하고 있습니다.";
     } else if (activity.kind === "image") {
       title = "이미지 생성 중";
       text = "이미지를 생성하고 있어요.";
       statusText = "Codex가 이미지를 생성하고 있습니다.";
-      petState = "waiting";
+      petState = "running";
     } else if (activity.kind === "test") {
       title = "테스트 중";
       text = activity.command ? `테스트 실행: ${truncateForBubble(activity.command)}` : "테스트 실행 중";
@@ -2225,7 +2398,9 @@ function registerCodexWatcher() {
       return;
     }
 
+    if (activity.success === false) petState = "failed";
     pauseAutoMovement("codex", petState);
+    if (petState === "failed") playReaction("failed");
     showCodexActivityBubble({ kind: "activity", title, busy: true, text, statusText }, activity);
   });
 
@@ -2368,6 +2543,7 @@ async function startProviderLogin(provider) {
 }
 
 function showProviderAccountError(providerLabel, error) {
+  playReaction("failed");
   showBubble({
     kind: "activity",
     title: `${providerLabel} 계정`,
@@ -2419,24 +2595,35 @@ function registerExternalWatcher(watcher, providerLabel) {
     if (working) show("작업 중", "작업을 시작했어요.", context);
   });
   watcher.on("user-message", (message, context) => show("요청 확인 중", `요청: ${message}`, context));
-  watcher.on("agent-message", (message, context) => show("응답 작성 중", message, context));
+  watcher.on("agent-message", (message, context) => show("응답 작성 중", message, context, "running"));
   watcher.on("tool-activity", (activity, context) => {
     const title = activity.kind === "patch"
       ? "파일 수정 중"
-      : activity.kind === "search"
+      : ["read", "search"].includes(activity.kind)
         ? "자료 확인 중"
         : "명령 실행 중";
-    show(title, activity.command || title, context, activity.kind === "search" ? "review" : "running");
+    const state = activity.success === false
+      ? "failed"
+      : ["read", "search"].includes(activity.kind)
+        ? "review"
+        : "running";
+    show(title, activity.command || title, context, state);
+    if (state === "failed") playReaction("failed");
   });
   watcher.on("task-finished", (result) => {
     activeActivityBubbles.remove(result.threadId);
-    if (!isAnyProviderWorking()) playReaction("jumping");
+    const failed = didTaskFail(result);
+    playReaction(failed ? "failed" : "jumping");
     const visible = showWatcherActivityBubble({
       kind: "activity",
-      title: `${providerLabel} 작업 완료`,
+      title: `${providerLabel} ${failed ? "작업 실패" : "작업 완료"}`,
       busy: false,
-      text: result.message || `${providerLabel} 작업이 끝났어요.`,
-      statusText: `${providerLabel} 작업이 완료됐습니다.`,
+      text: result.message || (failed
+        ? `${providerLabel} 작업 중 문제가 발생했어요.`
+        : `${providerLabel} 작업이 끝났어요.`),
+      statusText: failed
+        ? `${providerLabel} 작업 중 문제가 발생했습니다.`
+        : `${providerLabel} 작업이 완료됐습니다.`,
     });
     if (visible) bubbleHideTimer = setTimeout(restoreActiveActivityBubble, BUBBLE_CONFIG.doneAutoHideMs);
   });
@@ -2578,7 +2765,7 @@ function createWindow() {
     startMovementLoop({ resetPosition: false });
 
     // watcher가 창 로드 전에 상태를 복원했을 수 있으므로 현재 상태를 다시 보냅니다.
-    sendPetState(runtime.currentState);
+    resendCurrentPetState();
     refreshPetSprite({ force: true });
     refreshTrayMenu();
   }

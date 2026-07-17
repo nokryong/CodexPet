@@ -28,7 +28,9 @@ test("shell 명령을 테스트, 빌드, 일반 명령으로 분류한다", () =
   assert.equal(classifyShellCommand("npm test").kind, "test");
   assert.equal(classifyShellCommand("node --test test/codex-watcher.test.js").kind, "test");
   assert.equal(classifyShellCommand("npm run dist").kind, "build");
-  assert.equal(classifyShellCommand("git status --short").kind, "command");
+  assert.equal(classifyShellCommand("git status --short").kind, "read");
+  assert.equal(classifyShellCommand("Get-Content src/main.js").kind, "read");
+  assert.equal(classifyShellCommand("node scripts/update.js").kind, "command");
 });
 
 test("세션별 완료 이벤트에 정확한 thread id를 포함한다", () => {
