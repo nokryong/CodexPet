@@ -34,13 +34,12 @@ body {
   pointer-events: none;
 }
 
-#resize-handle {
+.resize-handle {
   position: absolute;
-  right: 0;
-  bottom: 0;
-  width: 16px;
-  height: 16px;
+  width: 36px;
+  height: 36px;
   cursor: nwse-resize;
+  touch-action: none;
   opacity: 0;
   transition: opacity 0.2s;
   z-index: 10;
@@ -48,7 +47,37 @@ body {
   filter: drop-shadow(1px 1px 1px rgba(0,0,0,0.8));
 }
 
-body:hover #resize-handle {
+.resize-handle svg {
+  position: absolute;
+  display: block;
+  width: 16px;
+  height: 16px;
+  pointer-events: none;
+}
+
+.resize-handle[data-resize-corner="top-left"] {
+  top: 0;
+  left: 0;
+}
+
+.resize-handle[data-resize-corner="top-left"] svg {
+  top: 0;
+  left: 0;
+  transform: rotate(180deg);
+}
+
+.resize-handle[data-resize-corner="bottom-right"] {
+  right: 0;
+  bottom: 0;
+}
+
+.resize-handle[data-resize-corner="bottom-right"] svg {
+  right: 0;
+  bottom: 0;
+}
+
+body:hover .resize-handle,
+body.is-resizing .resize-handle {
   opacity: 1;
 }
 

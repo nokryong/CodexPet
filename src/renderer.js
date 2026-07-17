@@ -48,7 +48,7 @@ const POINTER_CONFIG = Object.freeze({
 const petElement = document.querySelector("#pet");
 const petCanvas = document.querySelector("#pet-canvas");
 const petContext = petCanvas.getContext("2d", { alpha: true });
-const resizeHandle = document.querySelector("#resize-handle");
+const resizeHandles = document.querySelectorAll("[data-resize-corner]");
 const errorElement = document.querySelector("#error");
 
 let appConfig = null;
@@ -373,40 +373,58 @@ function handleContextMenu(event) {
 let resizeState = {
   isResizing: false,
   pointerId: null,
-  startX: 0,
+  startScreenX: 0,
+  startClientX: 0,
   startWidth: 0,
+  corner: "bottom-right",
+  handle: null,
 };
 
 function handleResizePointerDown(event) {
   event.stopPropagation();
   if (event.button !== 0) return;
+  event.preventDefault();
+
+  const handle = event.currentTarget;
+  const corner = handle?.dataset.resizeCorner === "top-left" ? "top-left" : "bottom-right";
 
   resizeState = {
     isResizing: true,
     pointerId: event.pointerId,
-    startX: event.clientX,
+    startScreenX: event.screenX,
+    startClientX: event.clientX,
     startWidth: document.body.clientWidth,
+    corner,
+    handle,
   };
-  resizeHandle.setPointerCapture(event.pointerId);
+  document.body.classList.add("is-resizing");
+  handle.setPointerCapture(event.pointerId);
 }
 
 function handleResizePointerMove(event) {
   if (!resizeState.isResizing || event.pointerId !== resizeState.pointerId) return;
 
-  const deltaX = event.clientX - resizeState.startX;
+  const direction = resizeState.corner === "top-left" ? -1 : 1;
+  const screenDeltaX = event.screenX - resizeState.startScreenX;
+  const clientDeltaX = event.clientX - resizeState.startClientX;
+  // 실제 창에서는 screenX가 안정적입니다. 합성 입력처럼 screenX가 고정된 경우 clientX를 fallback으로 씁니다.
+  const hasScreenCoordinates = resizeState.startScreenX !== 0 || event.screenX !== 0;
+  const deltaX = (hasScreenCoordinates ? screenDeltaX : clientDeltaX) * direction;
   let newWidth = Math.max(64, resizeState.startWidth + deltaX); // 최소 너비 64
   let newHeight = newWidth * (BASE_HEIGHT / BASE_WIDTH);
 
-  window.petApi.resizeWindow(newWidth, newHeight);
+  window.petApi.resizeWindow(newWidth, newHeight, resizeState.corner);
 }
 
 function handleResizePointerUpOrCancel(event) {
   if (!resizeState.isResizing || event.pointerId !== resizeState.pointerId) return;
 
-  if (resizeHandle.hasPointerCapture(event.pointerId)) {
-    resizeHandle.releasePointerCapture(event.pointerId);
+  if (resizeState.handle?.hasPointerCapture(event.pointerId)) {
+    resizeState.handle.releasePointerCapture(event.pointerId);
   }
   resizeState.isResizing = false;
+  resizeState.handle = null;
+  document.body.classList.remove("is-resizing");
   window.petApi.resizeEnd();
 }
 
@@ -418,12 +436,13 @@ function registerDomEvents() {
   petElement.addEventListener("pointercancel", handlePointerCancel);
   petElement.addEventListener("contextmenu", handleContextMenu);
 
-  if (resizeHandle) {
+  for (const resizeHandle of resizeHandles) {
     resizeHandle.addEventListener("pointerdown", handleResizePointerDown);
-    resizeHandle.addEventListener("pointermove", handleResizePointerMove);
-    resizeHandle.addEventListener("pointerup", handleResizePointerUpOrCancel);
-    resizeHandle.addEventListener("pointercancel", handleResizePointerUpOrCancel);
   }
+  // macOS에서 투명 네이티브 창 크기가 바뀌며 포인터가 핸들 밖으로 나가도 드래그를 이어갑니다.
+  window.addEventListener("pointermove", handleResizePointerMove);
+  window.addEventListener("pointerup", handleResizePointerUpOrCancel);
+  window.addEventListener("pointercancel", handleResizePointerUpOrCancel);
 }
 
 // renderer 진입점입니다.

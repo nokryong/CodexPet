@@ -17,6 +17,37 @@ function normalizeWindowSize(width, resizeConfig) {
   };
 }
 
+// 좌상단 핸들은 창의 우하단을 고정한 채 크기를 바꿉니다.
+// 화면 오른쪽/아래 끝에 붙은 펫도 바깥쪽 마우스 공간 없이 확대할 수 있습니다.
+function resizeWindowGeometry(currentGeometry, width, anchor, resizeConfig) {
+  if (!currentGeometry || typeof currentGeometry !== "object") return null;
+
+  const { x, y, width: currentWidth, height: currentHeight } = currentGeometry;
+  if (
+    !isFiniteNumber(x) ||
+    !isFiniteNumber(y) ||
+    !isFiniteNumber(currentWidth) ||
+    !isFiniteNumber(currentHeight) ||
+    currentWidth <= 0 ||
+    currentHeight <= 0
+  ) {
+    return null;
+  }
+
+  const size = normalizeWindowSize(width, resizeConfig);
+  if (!size) return null;
+
+  if (anchor === "top-left") {
+    return {
+      x: x + currentWidth - size.width,
+      y: y + currentHeight - size.height,
+      ...size,
+    };
+  }
+
+  return { x, y, ...size };
+}
+
 // Windows에서 비리사이즈 Electron 창을 반복 이동하면 DPI 배율에 따라 네이티브 창 크기가
 // 함께 흔들릴 수 있습니다. 위치만 보내지 않고 의도한 크기를 매번 함께 적용할 수 있도록
 // BrowserWindow.setBounds에 넘길 정수 bounds를 한 곳에서 만듭니다.
@@ -114,5 +145,6 @@ function restoreWindowGeometry(savedGeometry, displays, resizeConfig) {
 module.exports = {
   createStableWindowBounds,
   normalizeWindowSize,
+  resizeWindowGeometry,
   restoreWindowGeometry,
 };

@@ -28,6 +28,7 @@ const { ActivityBubbleState, applyActivityPrivacy } = require("./activity-bubble
 const {
   createStableWindowBounds,
   normalizeWindowSize,
+  resizeWindowGeometry,
   restoreWindowGeometry,
 } = require("./window-geometry");
 const { normalizeFontFamily } = require("./appearance-settings");
@@ -992,6 +993,7 @@ function toggleAutoLaunch() {
     openAtLogin: !isAutoLaunchEnabled(),
     ...getLoginItemOptions(),
   });
+  refreshTrayMenu();
 }
 
 // 펫 선택 메뉴는 펫 우클릭 메뉴와 시스템 트레이 메뉴에서 같이 사용합니다.
@@ -1694,34 +1696,29 @@ function buildCodexAccountSubmenu() {
   });
 }
 
-// 시스템 트레이 메뉴는 창이 투명해져서 펫 우클릭 메뉴를 못 여는 상황에서도 접근할 수 있는 안전장치입니다.
-function buildTrayMenu() {
+function buildManualMotionSubmenu() {
+  return [
+    { label: "기본 대기", click: () => playManualReaction("idle") },
+    { label: "인사", click: () => playManualReaction("waving") },
+    { label: "점프", click: () => playManualReaction("jumping") },
+    { label: "축 처짐", click: () => playManualReaction("failed") },
+    { label: "대기", click: () => playManualReaction("waiting") },
+    { label: "검토 중", click: () => playManualReaction("review") },
+    { label: "작업 중", click: () => playManualReaction("running") },
+    { label: "오른쪽 이동", click: () => playManualReaction("runningRight") },
+    { label: "왼쪽 이동", click: () => playManualReaction("runningLeft") },
+  ];
+}
+
+// 펫 우클릭과 트레이가 공유하는 단일 메뉴 정의입니다.
+// 두 표시 adapter는 이 템플릿을 Electron Menu로 바꾸는 역할만 가집니다.
+function buildAppMenuTemplate() {
   const isPetVisible = Boolean(petWindow && !petWindow.isDestroyed() && petWindow.isVisible());
 
-  return Menu.buildFromTemplate([
-    {
-      label: "설정…",
-      click: openSettingsWindow,
-    },
-    { type: "separator" },
-    {
-      label: "CodePet 보이기",
-      enabled: !isPetVisible,
-      click: showPetWindowFromTray,
-    },
-    {
-      label: "CodePet 숨기기",
-      enabled: isPetVisible,
-      click: hidePetWindowToTray,
-    },
+  return [
+    { label: "설정…", click: openSettingsWindow },
     { type: "separator" },
     { label: "계정", submenu: buildProviderAccountSubmenu() },
-    {
-      label: "Codex 재시작 없는 전환 (프록시)",
-      type: "checkbox",
-      checked: isCodexProxyModeEnabled(),
-      click: () => setCodexProxyMode(!isCodexProxyModeEnabled()),
-    },
     {
       label: "펫 바꾸기",
       submenu: buildPetSelectionSubmenu(),
@@ -1737,12 +1734,35 @@ function buildTrayMenu() {
       checked: runtime.followMouse,
       click: toggleFollowMouse,
     },
+    {
+      label: "모션 실행",
+      submenu: buildManualMotionSubmenu(),
+    },
     { type: "separator" },
     {
-      label: "완전 종료",
-      click: quitApp,
+      label: "Codex 재시작 없는 전환 (프록시)",
+      type: "checkbox",
+      checked: isCodexProxyModeEnabled(),
+      click: () => setCodexProxyMode(!isCodexProxyModeEnabled()),
     },
-  ]);
+    {
+      label: "로그인 시 자동 실행",
+      type: "checkbox",
+      checked: isAutoLaunchEnabled(),
+      click: toggleAutoLaunch,
+    },
+    { type: "separator" },
+    {
+      label: isPetVisible ? "숨기기" : "보이기",
+      click: isPetVisible ? hidePetWindowToTray : showPetWindowFromTray,
+    },
+    { label: "완전 종료", click: quitApp },
+  ];
+}
+
+// 시스템 트레이 메뉴는 창이 투명해져서 펫 우클릭 메뉴를 못 여는 상황에서도 접근할 수 있는 안전장치입니다.
+function buildTrayMenu() {
+  return Menu.buildFromTemplate(buildAppMenuTemplate());
 }
 
 // 트레이 메뉴는 현재 표시 상태, 일시정지 상태, 펫 선택 상태를 반영해야 하므로 상태가 바뀔 때마다 다시 만듭니다.
@@ -1828,90 +1848,7 @@ function toggleFollowMouse() {
 // renderer가 우클릭을 감지하면 main process에서 네이티브 메뉴를 띄웁니다.
 function showContextMenu() {
   if (!petWindow || petWindow.isDestroyed()) return;
-
-  const template = [
-    { label: "설정…", click: openSettingsWindow },
-    { type: "separator" },
-    { label: "계정", submenu: buildProviderAccountSubmenu() },
-    {
-      label: "펫 바꾸기",
-      submenu: buildPetSelectionSubmenu(),
-    },
-    { type: "separator" },
-    {
-      label: runtime.manualPaused ? "다시 시작" : "일시 정지",
-      click: toggleManualPause,
-    },
-    { type: "separator" },
-    {
-      label: "마우스 따라가기",
-      type: "checkbox",
-      checked: runtime.followMouse,
-      click: toggleFollowMouse,
-    },
-    { type: "separator" },
-    {
-      label: "모션 실행",
-      submenu: [
-        {
-          label: "기본 대기",
-          click: () => playManualReaction("idle"),
-        },
-        {
-          label: "인사",
-          click: () => playManualReaction("waving"),
-        },
-        {
-          label: "점프",
-          click: () => playManualReaction("jumping"),
-        },
-        {
-          label: "축 처짐",
-          click: () => playManualReaction("failed"),
-        },
-        {
-          label: "대기",
-          click: () => playManualReaction("waiting"),
-        },
-        {
-          label: "검토 중",
-          click: () => playManualReaction("review"),
-        },
-        {
-          label: "작업 중",
-          click: () => playManualReaction("running"),
-        },
-        {
-          label: "오른쪽 이동",
-          click: () => playManualReaction("runningRight"),
-        },
-        {
-          label: "왼쪽 이동",
-          click: () => playManualReaction("runningLeft"),
-        },
-      ],
-    },
-    { type: "separator" },
-    {
-      label: "Codex 재시작 없는 전환 (프록시)",
-      type: "checkbox",
-      checked: isCodexProxyModeEnabled(),
-      click: () => setCodexProxyMode(!isCodexProxyModeEnabled()),
-    },
-    {
-      label: "로그인 시 자동 실행",
-      type: "checkbox",
-      checked: isAutoLaunchEnabled(),
-      click: toggleAutoLaunch,
-    },
-    { type: "separator" },
-    {
-      label: "숨기기",
-      click: hidePetWindowToTray,
-    },
-  ];
-
-  Menu.buildFromTemplate(template).popup({ window: petWindow });
+  Menu.buildFromTemplate(buildAppMenuTemplate()).popup({ window: petWindow });
 }
 
 // 드래그 시작 시 자동 이동을 멈추고 기준 좌표를 저장합니다.
@@ -2959,19 +2896,24 @@ function registerIpcHandlers() {
     handleDragMove(screenPoint);
   });
   ipcMain.on(IPC_CHANNELS.DRAG_END, handleDragEnd);
-  ipcMain.on(IPC_CHANNELS.RESIZE_WINDOW, (_event, w, h) => {
+  ipcMain.on(IPC_CHANNELS.RESIZE_WINDOW, (_event, w, _h, anchor) => {
     if (!petWindow || petWindow.isDestroyed()) return;
 
-    const nextSize = normalizeWindowSize(Number(w), RESIZE_CONFIG);
-    if (!nextSize) {
-      console.warn("[desktop-pet] Invalid resize request ignored.", w, h);
+    const nextGeometry = resizeWindowGeometry(
+      { x: runtime.x, y: runtime.y, width: runtime.width, height: runtime.height },
+      Number(w),
+      anchor === "top-left" ? "top-left" : "bottom-right",
+      RESIZE_CONFIG
+    );
+    if (!nextGeometry) {
+      console.warn("[desktop-pet] Invalid resize request ignored.", w, _h, anchor);
       return;
     }
 
-    runtime.width = nextSize.width;
-    runtime.height = nextSize.height;
+    runtime.width = nextGeometry.width;
+    runtime.height = nextGeometry.height;
     petWindow.setContentSize(runtime.width, runtime.height, false);
-    moveWindowTo(runtime.x, runtime.y);
+    moveWindowTo(nextGeometry.x, nextGeometry.y);
   });
   ipcMain.on(IPC_CHANNELS.RESIZE_END, () => {
     if (!petWindow || petWindow.isDestroyed()) return;

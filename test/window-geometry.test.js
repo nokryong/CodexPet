@@ -4,6 +4,7 @@ const assert = require("node:assert/strict");
 const {
   createStableWindowBounds,
   normalizeWindowSize,
+  resizeWindowGeometry,
   restoreWindowGeometry,
 } = require("../src/window-geometry");
 
@@ -33,6 +34,18 @@ test("저장 크기는 현재 최소/최대 및 종횡비 규칙으로 정규화
   assert.deepEqual(normalizeWindowSize(600, RESIZE_CONFIG), { width: 512, height: 555 });
   assert.deepEqual(normalizeWindowSize(12, RESIZE_CONFIG), { width: 64, height: 69 });
   assert.equal(normalizeWindowSize(Number.NaN, RESIZE_CONFIG), null);
+});
+
+test("화면 우하단의 펫은 좌상단 핸들로 우하단 모서리를 고정한 채 확대한다", () => {
+  assert.deepEqual(
+    resizeWindowGeometry(
+      { x: 1608, y: 961, width: 192, height: 208 },
+      292,
+      "top-left",
+      RESIZE_CONFIG
+    ),
+    { x: 1508, y: 853, width: 292, height: 316 }
+  );
 });
 
 test("복원 창은 제거된 모니터 좌표와 부분 화면 밖 좌표를 현재 work area 안으로 보정한다", () => {

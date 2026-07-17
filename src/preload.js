@@ -71,8 +71,8 @@ contextBridge.exposeInMainWorld("petApi", {
   dragEnd: () => {
     ipcRenderer.send(IPC_CHANNELS.DRAG_END);
   },
-  resizeWindow: (width, height) => {
-    ipcRenderer.send(IPC_CHANNELS.RESIZE_WINDOW, width, height);
+  resizeWindow: (width, height, anchor) => {
+    ipcRenderer.send(IPC_CHANNELS.RESIZE_WINDOW, width, height, anchor);
   },
   resizeEnd: () => {
     ipcRenderer.send(IPC_CHANNELS.RESIZE_END);
